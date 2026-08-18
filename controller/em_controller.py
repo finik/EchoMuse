@@ -171,6 +171,14 @@ SPEAKER_BYTES  = SPEAKER_PERIOD * 2       # 4096 bytes/period (mono S16)
 # must allow for the delayed start.
 SPEAKER_PRIME_SECONDS = 1.1
 
+# How long a follow-up listening window (opened after every answer that
+# actually said something — see the turn loop in _run_voice_locked) waits
+# for the user to start a next sentence before giving up quietly and
+# returning to wake-word idle. User-tuned: long enough for a real
+# back-and-forth reply, short enough that the mic doesn't sit hot picking up
+# unrelated room chatter for too long.
+FOLLOWUP_NO_SPEECH_TIMEOUT = 9.0
+
 # Control-plane RTT probing. 5s rather than the old 30s keepalive cadence:
 # characterising jitter needs samples, and one tiny JSON message per device
 # per 5s is negligible next to the 256 kbps continuous mic upload each
@@ -1628,15 +1636,27 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown", is_w
             # initial wakeword-triggered turn.
             turn_label      = trigger_label
             preroll_discard = esphome.VOICE_PREROLL_DISCARD if is_wakeword else 0
+            # None on the first (wake/button) turn — mints a fresh id there.
+            # Carried forward across continuation/follow-up turns below so
+            # HA's conversation agent keeps short-term context.
+            conversation_id = None
             while True:
                 should_continue = False
+                turn_ok         = False
                 try:
-                    should_continue = await esphome.trigger_voice_turn(
+                    should_continue, turn_ok, conversation_id = await esphome.trigger_voice_turn(
                         device=device,
                         on_thinking=on_thinking_esphome,
                         post_turn_play=post_turn_play_esphome,
                         trigger_label=turn_label,
                         preroll_discard=preroll_discard,
+                        conversation_id=conversation_id,
+                        # Only follow-up turns get the longer, user-tuned
+                        # grace period — the original wake/button/barge/
+                        # HA-continuation turns keep em_turnclock's default.
+                        no_speech_timeout=(
+                            FOLLOWUP_NO_SPEECH_TIMEOUT if turn_label == "followup" else None
+                        ),
                     )
                 finally:
                     # Watcher spans thinking→playback and is owned here:
@@ -1661,6 +1681,9 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown", is_w
                     device.barge_detected = False
                     device.cancel_event.clear()
                     log.info(f"[{device.device_id}] Barge-in: starting interrupting turn")
+                    # Fresh conversation — an interrupting command is a new
+                    # utterance, not a reply to what was just cut off.
+                    conversation_id = None
                     await device.mic_start()  # defensive no-op if running
                     # Re-arm listening state — cleanup_esphome() in the
                     # finally just turned the ring off, which left the
@@ -1715,6 +1738,50 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown", is_w
                     stop_spin.clear()
                     spin_task = None
                     # Fresh phase flag for the next turn's watcher.
+                    playback_started = asyncio.Event()
+                elif turn_ok and not device.cancel_event.is_set():
+                    # Open a follow-up window ONLY after a turn that actually
+                    # produced a spoken answer (trace.outcome == "ok" — see
+                    # trigger_voice_turn) and HA didn't itself ask a follow-up
+                    # question. This is deliberately narrower than "wasn't a
+                    # clean no-speech timeout": PR #208 review caught that
+                    # every failure outcome (stream_timeout, pipeline_refused,
+                    # tts_error, no_tts) also left the old no_speech_timeout_hit
+                    # check False, so a turn that errored out — or one that
+                    # only picked up noise without producing a real reply —
+                    # opened a window exactly like a real answer did. Noise
+                    # alone must close the loop, not extend it.
+                    #
+                    # No chime — a follow-up turn that starts silently and a
+                    # chime playing into a mic that's about to listen for it
+                    # were the two ways this used to loop forever (device
+                    # hears its own tone, speech_seen latches true, the
+                    # no-speech timeout can never fire again for that turn).
+                    #
+                    # Chains: another "ok" answer re-enters this branch and
+                    # opens another window. Ends the moment a "followup" turn
+                    # comes back with turn_ok=False (see the final `else`) —
+                    # noise, silence, or a genuine error all close it the same
+                    # way, just distinguished from an initial accidental wake
+                    # by the longer FOLLOWUP_NO_SPEECH_TIMEOUT grace period.
+                    log.info(f"[{device.device_id}] Opening follow-up listening window ({FOLLOWUP_NO_SPEECH_TIMEOUT}s)")
+                    await device.mic_start()
+                    drained = 0
+                    while not device.voice_queue.empty():
+                        try:
+                            device.voice_queue.get_nowait()
+                            drained += 1
+                        except asyncio.QueueEmpty:
+                            break
+                    if drained:
+                        log.debug(f"[{device.device_id}] Follow-up window: drained {drained} stale frames")
+                    device.listening = True
+                    await leds_listening(device)
+                    await _push_device_state(device)
+                    turn_label      = "followup"
+                    preroll_discard = 0
+                    stop_spin.clear()
+                    spin_task = None
                     playback_started = asyncio.Event()
                 else:
                     break
