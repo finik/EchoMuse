@@ -20,3 +20,6 @@ controller/models/
 *.db
 *.db-wal
 *.db-shm
+
+# macOS Finder metadata
+.DS_Store
