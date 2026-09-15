@@ -177,7 +177,7 @@ SPEAKER_PRIME_SECONDS = 1.1
 # returning to wake-word idle. User-tuned: long enough for a real
 # back-and-forth reply, short enough that the mic doesn't sit hot picking up
 # unrelated room chatter for too long.
-FOLLOWUP_NO_SPEECH_TIMEOUT = 9.0
+FOLLOWUP_NO_SPEECH_TIMEOUT = 6.0
 
 # Control-plane RTT probing. 5s rather than the old 30s keepalive cadence:
 # characterising jitter needs samples, and one tiny JSON message per device
@@ -948,6 +948,38 @@ async def leds_listening(device: Device):
         await device.set_leds(device.led_scene["listening"], listening=True)
 
 
+async def leds_followup_countdown(device: Device, seconds: float):
+    """
+    Empty the listening ring one segment at a time while the follow-up window
+    runs out, so the ring says how long is left rather than just "listening".
+
+    Controller-rendered rather than a device-side animation pattern, deliberately:
+    at one frame every seconds/NUM_LEDS the cadence is ~500ms, where the WiFi and
+    event-loop jitter that justifies local rendering for the 80ms spinner is
+    invisible. It also works on every firmware in the field with no device change,
+    which a new `pattern` would not.
+
+    The duration is passed in from FOLLOWUP_NO_SPEECH_TIMEOUT rather than being a
+    constant of its own: a ring that empties before the device stops listening
+    tells the user it has given up when it has not, which is worse than no
+    countdown at all.
+
+    Cancelled by on_thinking_esphome the moment speech ends — from then on the
+    spinner owns the ring.
+    """
+    frame = list(device.led_scene["listening"])
+    n = len(frame)
+    if n == 0 or seconds <= 0:
+        return
+    step = seconds / n
+    off = (0, 0, 0)
+    # Extinguish from the end of the frame, so it reads as a hand sweeping round
+    # rather than a gap opening in the middle.
+    for lit in range(n - 1, -1, -1):
+        await asyncio.sleep(step)
+        await device.set_leds(frame[:lit] + [off] * (n - lit), listening=True)
+
+
 async def leds_spin_green(device: Device, stop_event: asyncio.Event):
     # Name is historical — the spinner renders whatever the device's scene
     # says (head+trail dot for solid scenes, rotating palette for pride).
@@ -1455,6 +1487,8 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown", is_w
 
             stop_spin = asyncio.Event()
             spin_task = None
+            # Follow-up countdown — runs only during a follow-up window.
+            countdown_task = None
             # Barge-in watcher state — reset per turn iteration below.
             watcher          = None
             playback_started = asyncio.Event()
@@ -1473,10 +1507,21 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown", is_w
                 watcher = None
 
             async def cleanup_esphome():
+                nonlocal countdown_task
                 device.thinking  = False
                 device.listening = False
                 await _push_device_state(device)
                 stop_spin.set()
+                # Cancel the countdown too, or a pending tick paints a partial
+                # ring after _leds_turn_end has cleared it — the ring would go
+                # dark and then show three segments for half a second.
+                if countdown_task is not None and not countdown_task.done():
+                    countdown_task.cancel()
+                    try:
+                        await countdown_task
+                    except asyncio.CancelledError:
+                        pass
+                countdown_task = None
                 if spin_task and not spin_task.done():
                     spin_task.cancel()
                     try:
@@ -1486,9 +1531,15 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown", is_w
                 await _leds_turn_end(device)
 
             async def on_thinking_esphome():
-                nonlocal spin_task, watcher
+                nonlocal spin_task, watcher, countdown_task
                 if stop_spin.is_set():
                     return  # cleanup already ran; turn is over
+                # The user spoke, so the window did not run out: stop the
+                # countdown before the spinner takes the ring, or its next
+                # frame lands on top of the spinner.
+                if countdown_task is not None and not countdown_task.done():
+                    countdown_task.cancel()
+                    countdown_task = None
                 device.thinking  = True
                 device.listening = False
                 await _push_device_state(device)
@@ -1778,6 +1829,11 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown", is_w
                     device.listening = True
                     await leds_listening(device)
                     await _push_device_state(device)
+                    # Then count the window down on the ring. Started after the
+                    # listening frame so the ring is full for the first tick.
+                    countdown_task = asyncio.create_task(
+                        leds_followup_countdown(device, FOLLOWUP_NO_SPEECH_TIMEOUT)
+                    )
                     turn_label      = "followup"
                     preroll_discard = 0
                     stop_spin.clear()
