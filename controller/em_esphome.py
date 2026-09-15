@@ -1262,14 +1262,13 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         ns_debug_raw = bytearray()
         ns_debug_out = bytearray()
 
-        # Utterance capture (saveUtterances): keep what was sent to HA for
-        # recognition, so it can be listened to from the Activity tab. The
-        # buffer is filled POST-NS, further down this loop — see the comment
-        # at the tap. Read once per turn, so toggling the setting mid-turn
-        # can't leave a half-recorded stream. Cleared unconditionally: a stale
-        # buffer from an earlier turn must never be attributed to this one.
-        capture     = bytearray() if getattr(device, "save_utterances", False) else None
-        device.last_utterance_pcm = None
+        # Utterance capture (saveUtterances) used to fill in here — the
+        # command audio sent to HA, POST-NS. Moved to em_controller.py's
+        # wake_word_listener instead: that's the only place the WAKE PHRASE
+        # itself (as opposed to what follows it) is ever available, and
+        # that's what saveUtterances now records. device.last_utterance_pcm
+        # is set there, at the moment of detection — this function no longer
+        # touches it at all, so it isn't reset or overwritten here.
 
         # Preroll discard — drop wake-word tail from voice_queue before
         # streaming to HA. Wake turns pass VOICE_PREROLL_DISCARD; button and
@@ -1470,17 +1469,6 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                             ns_debug_raw.extend(raw_payload)
                             ns_debug_out.extend(payload)
 
-                # Utterance capture sits HERE, below the denoiser, so the saved
-                # file is byte-for-byte what goes on the wire to HA — i.e. what
-                # STT actually heard. Tapping above NS (as this first shipped)
-                # answered "how good is the mic" but could not answer "why was
-                # the transcript wrong" on any device with nsAsr on, which is
-                # the question people actually ask. If NS fails mid-turn the
-                # payload falls back to raw for the rest of the turn and the
-                # capture follows it, which stays correct by construction.
-                if capture is not None and len(capture) < em_recordings.MAX_UTTERANCE_BYTES:
-                    capture.extend(payload)
-
                 if self._trace:
                     self._trace.audio_frames += 1
                 pcm_buf.extend(payload)
@@ -1496,12 +1484,6 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             # Validation tooling: when NS_DEBUG_DIR is set, persist what
             # STT actually received next to what the mic actually sent.
             em_ns.dump_debug_pair(self._log_name, bytes(ns_debug_raw), bytes(ns_debug_out))
-            # Hand the captured utterance to _persist_turn, which owns the
-            # write (it has the rowid the filename is keyed on). In `finally`
-            # so a cancelled or errored turn still saves what it heard —
-            # those are exactly the turns worth listening back to.
-            if capture:
-                device.last_utterance_pcm = bytes(capture)
 
     def disconnect(self) -> None:
         """
@@ -2050,13 +2032,18 @@ async def _record_dropped_turn(device, trigger_label: str, wake_info) -> None:
 
 async def _save_utterance(device, turn_id: int, turn_record: dict) -> None:
     """
-    Write the turn's captured mic audio (if saveUtterances is on) to
+    Write the turn's captured WAKE-PHRASE audio (if saveUtterances is on) to
     recordings/ and record the filename on the turn row.
 
+    device.last_utterance_pcm is populated in em_controller.wake_word_listener
+    at the moment of detection — a snapshot of its rolling pre-wake ring
+    buffer — not built here. This function only consumes and writes it.
+
     Runs after the insert because the filename is keyed on the rowid. The
-    buffer is consumed here — a turn that never streamed audio must not
-    inherit the previous turn's recording, and holding ~1MB of speech on
-    the Device past its one use has no upside.
+    buffer is consumed here — a turn that never had a wake-clip captured
+    (button/continuation/followup turns; barge-in) must not inherit a
+    previous turn's recording, and holding it on the Device past its one use
+    has no upside.
 
     Best-effort throughout: a full disk or a read-only volume costs the
     recording, never the turn.

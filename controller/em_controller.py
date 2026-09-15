@@ -953,14 +953,15 @@ async def leds_followup_countdown(device: Device, seconds: float):
     Empty the listening ring one segment at a time while the follow-up window
     runs out, so the ring says how long is left rather than just "listening".
 
-    Controller-rendered rather than a device-side animation pattern, deliberately:
-    at one frame every seconds/NUM_LEDS the cadence is ~500ms, where the WiFi and
-    event-loop jitter that justifies local rendering for the 80ms spinner is
-    invisible. It also works on every firmware in the field with no device change,
-    which a new `pattern` would not.
+    Controller-rendered rather than a device-side animation pattern, and that is
+    a deliberate choice rather than the lazy one: at one frame every
+    seconds/NUM_LEDS the cadence is ~500ms, where the WiFi and event-loop jitter
+    that justifies local rendering for the 80ms spinner is invisible. It also
+    works on every firmware in the field with no device change, which a new
+    `pattern` would not.
 
-    The duration is passed in from FOLLOWUP_NO_SPEECH_TIMEOUT rather than being a
-    constant of its own: a ring that empties before the device stops listening
+    The duration is passed in from FOLLOWUP_NO_SPEECH_TIMEOUT rather than being
+    a constant of its own: a ring that empties before the device stops listening
     tells the user it has given up when it has not, which is worse than no
     countdown at all.
 
@@ -1901,6 +1902,15 @@ async def wake_word_listener(device: Device):
     await device.mic_start()
 
     buf = bytearray()
+    # Rolling raw-audio buffer for saveUtterances: 20 x 80ms = 1.6s, enough
+    # to hold a full "hey jarvis" plus a little lead-in. This is the ONLY
+    # place the wake phrase itself is ever available — by the time a wake
+    # fires, OWW has already consumed it frame-by-frame from mic_queue with
+    # nothing else keeping a copy, so a recording of the trigger audio has
+    # to come from a buffer kept alongside the scoring loop, not from the
+    # post-wake command stream (which is a different, later capture point —
+    # see em_esphome._stream_mic_audio / em_recordings.py's original design).
+    wake_ring: collections.deque = collections.deque(maxlen=20)
     last_near_miss_log_ts = 0.0  # Q4: rate-limit near-miss INFO logging to 1/2s
     nm_pending = 0    # near-misses buffered since the last hourly-rollup flush
     nm_max     = 0.0  # highest buffered near-miss score
@@ -2013,6 +2023,8 @@ async def wake_word_listener(device: Device):
 
                 if device.speaking:
                     continue
+
+                wake_ring.append(frame)
 
                 # Per-room noise floor tracking (measurement only — the audio
                 # is never modified). Asymmetric EWMA: follows drops quickly
@@ -2205,6 +2217,14 @@ async def wake_word_listener(device: Device):
                             "threshold":   round(float(eff_threshold), 4),
                             "noise_floor": round(device.noise_floor, 5),
                         }
+                        # saveUtterances now records the WAKE PHRASE itself
+                        # (the ring above), not the command that follows it —
+                        # this is the only point in the pipeline where the
+                        # trigger audio still exists. _save_utterance (in
+                        # em_esphome.py) picks this up unchanged; it doesn't
+                        # care where last_utterance_pcm came from.
+                        if device.save_utterances:
+                            device.last_utterance_pcm = bytes(b"".join(wake_ring))
                         device.oww_paused.set()
                         log.debug(
                             f"[{device.device_id}] OWW: oww_paused set, "

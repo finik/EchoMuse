@@ -104,6 +104,13 @@ def test_retention_keeps_the_newest_n_per_device(tmp_path):
     assert kept[-1] == "dev1_6.wav"
 
 
+def test_retention_unlimited_when_keep_is_none(tmp_path):
+    db = _db(tmp_path)
+    for turn in range(1, 26):
+        rec.save("dev1", turn, _pcm(20), db_path=db, keep=None)
+    assert len(rec.list_for("dev1", db)) == 25
+
+
 def test_retention_is_per_device_not_global(tmp_path):
     db = _db(tmp_path)
     for turn in range(1, 13):

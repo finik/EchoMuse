@@ -9,10 +9,13 @@ capture quality before spending an evening tuning micGainDb/AEC/NS.
 
 Storage mirrors `em_oww_models`: files live in `recordings/` beside the
 SQLite DB, so they sit inside the persisted Docker volume and survive image
-upgrades. Retention is a hard per-device file count (KEEP_PER_DEVICE) —
-utterances are the one artefact here that contains raw speech, so "a
-bounded handful, then gone" is the point, not an optimisation. Pruning is
-by turn id parsed out of the filename rather than mtime: ids are monotonic
+upgrades. Retention is a per-device file count (KEEP_PER_DEVICE) — the
+upstream default is a small bounded handful, deliberately, since utterances
+are the one artefact here that contains raw speech. KEEP_PER_DEVICE=None
+disables pruning entirely (unlimited retention) — an explicit opt-in for
+when you want every capture kept, e.g. building a negative-hit training set
+rather than just spot-checking mic quality. Pruning (when enabled) is by
+turn id parsed out of the filename rather than mtime: ids are monotonic
 rowids, so the order is exact even if the volume is restored from a backup
 that flattened timestamps.
 
@@ -40,9 +43,10 @@ log = logging.getLogger("echomuse.recordings")
 
 RECORDINGS_SUBDIR = "recordings"
 
-# How many utterances to keep per device. Ten is what the feature was asked
-# for and is deliberately small — see the module docstring.
-KEEP_PER_DEVICE = 10
+# How many utterances to keep per device. None = unlimited (pruning
+# disabled) — see the module docstring for why you'd choose that over the
+# small default the feature originally shipped with.
+KEEP_PER_DEVICE = None
 
 # Wire format of the ASR-bound mic stream (em_esphome._stream_mic_audio).
 SAMPLE_RATE  = 16000
@@ -114,7 +118,7 @@ def duration_ms(pcm_len: int) -> int:
 
 
 def save(device_id: str, turn_id: int, pcm: bytes,
-         db_path: str | None = None, keep: int = KEEP_PER_DEVICE) -> str | None:
+         db_path: str | None = None, keep: int | None = KEEP_PER_DEVICE) -> str | None:
     """
     Write one turn's utterance and prune the device back to `keep` files.
 
@@ -154,11 +158,17 @@ def list_for(device_id: str, db_path: str | None = None) -> list[str]:
 
 
 def prune(device_id: str, db_path: str | None = None,
-          keep: int = KEEP_PER_DEVICE) -> list[str]:
+          keep: int | None = KEEP_PER_DEVICE) -> list[str]:
     """
     Delete all but the `keep` newest recordings for a device. Returns the
     filenames removed. Never raises — a failed unlink costs disk, not a turn.
+
+    keep=None means unlimited retention — nothing is pruned. Callers that
+    need an unconditional wipe (delete_device) pass an explicit keep=0
+    instead, which is unaffected by this.
     """
+    if keep is None:
+        return []
     directory = recordings_dir(db_path)
     removed: list[str] = []
     for name in list_for(device_id, db_path)[max(keep, 0):]:
