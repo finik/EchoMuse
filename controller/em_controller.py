@@ -968,19 +968,26 @@ async def leds_followup_countdown(device: Device, seconds: float):
     Cancelled by on_thinking_esphome the moment speech ends — from then on the
     spinner owns the ring.
     """
-    frame = list(device.led_scene["listening"])
-    n = len(frame)
+    scene = device.led_scene["listening"]
+    n = len(scene)
     if n == 0 or seconds <= 0:
         return
     step = seconds / n
     log.info(f"[{device.device_id}] Follow-up countdown: {n} segments over {seconds}s "
              f"({step * 1000:.0f}ms each)")
-    off = (0, 0, 0)
-    # Extinguish from the end of the frame, so it reads as a hand sweeping round
+
+    # The scene is ALREADY in the wire format the device parses — one dict per
+    # LED, {"id","r","g","b"} (em_scenes._leds). It unmarshals into []led.Led and
+    # discards the whole frame if that fails, with no log, so a frame carrying
+    # anything else vanishes in silence while the running animation keeps
+    # painting. Dark segments must therefore be dicts too, not (0,0,0) tuples.
+    dark = [{"id": i, "r": 0, "g": 0, "b": 0} for i in range(n)]
+
+    # Extinguish from the end of the ring, so it reads as a hand sweeping round
     # rather than a gap opening in the middle.
     for lit in range(n - 1, -1, -1):
         await asyncio.sleep(step)
-        await device.set_leds(frame[:lit] + [off] * (n - lit), listening=True)
+        await device.set_leds(list(scene[:lit]) + dark[lit:], listening=True)
 
 
 async def leds_spin_green(device: Device, stop_event: asyncio.Event):
