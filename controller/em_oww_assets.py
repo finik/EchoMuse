@@ -52,8 +52,16 @@ RUNTIME_NAME = "libonnxruntime.so"
 # once and never re-pushed when the model changes.
 SHARED_NAMES = ("melspectrogram.onnx", "embedding_model.onnx")
 
-# Where the vendored ARM runtime lands in the image (see Dockerfile).
-RUNTIME_DIR = "/app/models/oww_runtime"
+# Where the vendored ARM runtime lands in the image (see Dockerfile). The
+# Docker image's WORKDIR is /app and this file lives directly under it, so
+# deriving the default from __file__ instead of hardcoding "/app/..." keeps
+# the Docker path byte-identical while giving a bare-metal install a sane
+# default too (controller/models/oww_runtime) — same OWW_RUNTIME_DIR-override
+# treatment em_ns.py already gives NS_MODEL_DIR.
+RUNTIME_DIR = os.environ.get(
+    "OWW_RUNTIME_DIR",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "oww_runtime"),
+)
 
 # Classifier slots kept on a device, any mix of stock and custom.
 #
