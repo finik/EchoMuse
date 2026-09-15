@@ -973,6 +973,8 @@ async def leds_followup_countdown(device: Device, seconds: float):
     if n == 0 or seconds <= 0:
         return
     step = seconds / n
+    log.info(f"[{device.device_id}] Follow-up countdown: {n} segments over {seconds}s "
+             f"({step * 1000:.0f}ms each)")
     off = (0, 0, 0)
     # Extinguish from the end of the frame, so it reads as a hand sweeping round
     # rather than a gap opening in the middle.

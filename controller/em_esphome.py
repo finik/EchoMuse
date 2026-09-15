@@ -1025,7 +1025,17 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             # instead of hanging the turn (and the spinner) indefinitely.
             try:
                 await asyncio.wait_for(
-                    self._stream_mic_audio(device, preroll_discard=preroll_discard),
+                    self._stream_mic_audio(
+                        device,
+                        preroll_discard=preroll_discard,
+                        # Forwarding this is the whole point of the parameter:
+                        # _stream_mic_audio is where effective_no_speech_timeout
+                        # is computed, so dropping it here made every caller's
+                        # value dead and every turn use em_turnclock's 5s default
+                        # — including the follow-up window, which believed it was
+                        # granting a longer grace period and never did.
+                        no_speech_timeout=no_speech_timeout,
+                    ),
                     timeout=20.0,
                 )
             except asyncio.TimeoutError:
