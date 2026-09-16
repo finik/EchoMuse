@@ -1,14 +1,15 @@
 //go:build server
 
-// capture_mics: captures raw 9-channel audio from the biscuit mic array
-// and writes it to /data/local/tmp/capture.raw for offline analysis.
+// capture_mics: captures the raw mic array to /data/local/tmp/capture.raw for
+// offline analysis.
 //
 // Usage:
 //   capture_mics [seconds]   default: 5
 //
-// Output format: raw interleaved S24_3LE, 9 channels, 16kHz
-// Each frame: 9 samples × 3 bytes = 27 bytes
-// Each period (512 frames): 13,824 bytes
+// Output format: raw interleaved S24_3LE, 16kHz, `channels` channels — which is
+// board-specific (biscuit 9, rook 6), so analyse_capture.py must be given the
+// matching --channels or it mis-strides the file and reports plausible nonsense.
+// Frame size is channels x 3 bytes; a period is 512 frames.
 //
 // Build inside echomuse-compiler Docker container:
 //   go build -tags server -o capture_mics .
@@ -29,7 +30,7 @@ import (
 const (
 	cardNr    = 0
 	deviceNr  = 24
-	channels  = 9
+	channels  = 6 // rook: driver reports fixed 6 (tinypcminfo)
 	sampleRate = 16000
 	periodSize = 512
 	periodCount = 5

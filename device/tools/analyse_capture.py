@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-analyse_capture.py — decode and analyse a raw 9-channel S24_3LE mic capture
+analyse_capture.py — decode and analyse a raw S24_3LE mic capture
 from the biscuit mic array.
 
 Usage:
     python3 analyse_capture.py capture.raw [--plot]
 
-The script decodes all 9 channels, computes RMS per channel, and prints a
+The script decodes every channel, computes RMS per channel, and prints a
 ranked table. Run once per capture position to build up the channel→mic mapping.
 
 Test procedure:
@@ -18,7 +18,7 @@ Test procedure:
     4. After 6 positions (full 360°) the channel→physical-mic mapping is clear.
 
 Output format of capture.raw:
-    Raw interleaved S24_3LE, 9 channels, 16kHz
+    Raw interleaved S24_3LE, 16kHz, --channels channels (biscuit 9, rook 6)
     Each frame: 9 × 3 bytes = 27 bytes
     Frame rate: 16000/s
 """
@@ -29,6 +29,10 @@ import argparse
 import numpy as np
 
 
+# Default channel count. Board-dependent: biscuit's array is 9 (6 perimeter mics,
+# a centre mic, and a stereo playback loopback), rook's is 6 (4 mics, 2 idle).
+# Override with --channels; a mismatch is silent, because the wrong stride still
+# decodes to plausible-looking samples.
 N_CHANNELS = 9
 SAMPLE_RATE = 16000
 BYTES_PER_SAMPLE = 3  # S24_3LE
@@ -77,8 +81,8 @@ def bar(value: float, max_value: float, width: int = 30) -> str:
     return "█" * filled + "░" * (width - filled)
 
 
-def analyse(raw: bytes, label: str = ""):
-    channels = decode_s24_3le(raw)
+def analyse(raw: bytes, label: str = "", n_channels: int = N_CHANNELS):
+    channels = decode_s24_3le(raw, n_channels)
     n_frames = channels.shape[1]
     duration_ms = n_frames * 1000 // SAMPLE_RATE
 
@@ -90,7 +94,7 @@ def analyse(raw: bytes, label: str = ""):
     print(f"{'='*60}\n")
 
     rms_values = [(ch, rms(channels[ch]), rms_db(channels[ch]))
-                  for ch in range(N_CHANNELS)]
+                  for ch in range(n_channels)]
 
     # Sort by RMS descending for the ranking
     ranked = sorted(rms_values, key=lambda x: -x[1])
@@ -109,7 +113,7 @@ def analyse(raw: bytes, label: str = ""):
           f"(RMS {ranked[0][1]:.5f}, {ranked[0][2]:.1f} dBFS)")
 
     # Also show original channel order for easy cross-referencing
-    print(f"\n  Channel order (0–8):")
+    print(f"\n  Channel order (0–{n_channels - 1}):")
     orig = sorted(rms_values, key=lambda x: x[0])
     vals = [f"ch{ch}={db:.1f}dB" for ch, _, db in orig]
     print(f"  {', '.join(vals)}")
@@ -117,25 +121,25 @@ def analyse(raw: bytes, label: str = ""):
     return ranked
 
 
-def plot_channels(raw: bytes, title: str = ""):
+def plot_channels(raw: bytes, title: str = "", n_channels: int = N_CHANNELS):
     try:
         import matplotlib.pyplot as plt
     except ImportError:
         print("matplotlib not available — skipping plot")
         return
 
-    channels = decode_s24_3le(raw)
+    channels = decode_s24_3le(raw, n_channels)
     n_frames = channels.shape[1]
     t = np.arange(n_frames) / SAMPLE_RATE
 
-    fig, axes = plt.subplots(N_CHANNELS, 1, figsize=(14, 12), sharex=True)
+    fig, axes = plt.subplots(n_channels, 1, figsize=(14, 12), sharex=True)
     if title:
         fig.suptitle(title, fontsize=12)
 
-    rms_vals = [rms(channels[ch]) for ch in range(N_CHANNELS)]
+    rms_vals = [rms(channels[ch]) for ch in range(n_channels)]
     max_rms = max(rms_vals) if max(rms_vals) > 0 else 1.0
 
-    for ch in range(N_CHANNELS):
+    for ch in range(n_channels):
         ax = axes[ch]
         ax.plot(t, channels[ch], linewidth=0.3, color='steelblue')
         ax.set_ylabel(f"Ch {ch}\n{rms_db(channels[ch]):.1f}dB",
@@ -153,11 +157,14 @@ def plot_channels(raw: bytes, title: str = ""):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Analyse raw 9-channel S24_3LE mic capture from biscuit"
+        description="Analyse a raw S24_3LE mic capture from an Echo mic array"
     )
     parser.add_argument("capture_file", help="Raw capture file (capture.raw)")
+    parser.add_argument("--channels", type=int, default=N_CHANNELS,
+                        help=f"Channels in the capture (default {N_CHANNELS}; "
+                             "biscuit 9, rook 6)")
     parser.add_argument("--plot", action="store_true",
-                        help="Plot all 9 channels (requires matplotlib)")
+                        help="Plot every channel (requires matplotlib)")
     parser.add_argument("--label", default="",
                         help="Label for this capture (e.g. '0deg_action_button')")
     args = parser.parse_args()
@@ -174,10 +181,10 @@ def main():
         sys.exit(1)
 
     label = args.label or args.capture_file
-    ranked = analyse(raw, label)
+    ranked = analyse(raw, label, args.channels)
 
     if args.plot:
-        plot_channels(raw, title=label)
+        plot_channels(raw, title=label, n_channels=args.channels)
 
 
 if __name__ == "__main__":
