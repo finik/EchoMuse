@@ -135,6 +135,7 @@ func TestGeometryComesFromTheProfile(t *testing.T) {
 		wakeCh, echoRef      int
 	}{
 		{"biscuit", 9, 27, 6, 6, 8},
+		{"rook", 6, 18, 4, 2, -1},
 	} {
 		t.Run(tc.board, func(t *testing.T) {
 			b := NewFor(profile.ByName(tc.board))
@@ -240,9 +241,19 @@ func TestEchoRefRejectsShortBuffer(t *testing.T) {
 	}
 }
 
+// A board with no loopback must report no reference rather than reading a
+// channel that does not exist — on rook that index would be past the frame.
+func TestEchoRefAbsentOnBoardWithoutLoopback(t *testing.T) {
+	b := NewFor(profile.ByName("rook"))
+	raw := rawPeriod(b, periodFrames, func(ch int) int32 { return int32(ch) << 12 })
+	if out := b.EchoRef(raw); out != nil {
+		t.Fatalf("board has no reference channel; EchoRef returned %d bytes", len(out))
+	}
+}
+
 // The wake stream takes the profile's measured capsule, not a hardcoded one.
 func TestWakeSelectUsesTheProfileChannel(t *testing.T) {
-	for _, board := range []string{"biscuit"} {
+	for _, board := range []string{"biscuit", "rook"} {
 		t.Run(board, func(t *testing.T) {
 			b := NewFor(profile.ByName(board))
 			// Only the wake channel carries signal; everything else is silent.

@@ -5,7 +5,7 @@ import "testing"
 // An unknown board must behave exactly as this firmware did before profiles
 // existed: biscuit's geometry, not a refusal to start and not an empty profile.
 func TestUnknownBoardFallsBackToBiscuit(t *testing.T) {
-	for _, name := range []string{"", "rook", "crown", "checkers", "  ", "BISCUIT"} {
+	for _, name := range []string{"", "crown", "checkers", "  ", "BISCUIT"} {
 		if got := forName(name); got != biscuit {
 			t.Fatalf("forName(%q) = %v, want biscuit", name, got.Name)
 		}
@@ -13,6 +13,9 @@ func TestUnknownBoardFallsBackToBiscuit(t *testing.T) {
 }
 
 func TestKnownBoardsResolve(t *testing.T) {
+	if got := forName("rook"); got != rook {
+		t.Fatalf("forName(rook) = %s, want rook", got.Name)
+	}
 	if got := forName(" biscuit "); got != biscuit {
 		t.Fatalf("whitespace should be trimmed, got %s", got.Name)
 	}
@@ -40,6 +43,22 @@ func TestBiscuitMatchesTheConstantsItReplaced(t *testing.T) {
 	}
 	if m.Card != 0 || m.Device != 24 {
 		t.Errorf("mic pcm = card %d device %d, want 0/24", m.Card, m.Device)
+	}
+}
+
+func TestRookGeometry(t *testing.T) {
+	m := rook.Mic
+	if m.Channels != 6 {
+		t.Errorf("channels = %d, want 6 (driver reports min=max=6)", m.Channels)
+	}
+	if m.FrameBytes() != 18 {
+		t.Errorf("frame = %d bytes, want 18", m.FrameBytes())
+	}
+	if m.WakeChannel != 2 {
+		t.Errorf("wake channel = %d, want 2 (measured, not geometric)", m.WakeChannel)
+	}
+	if len(m.RefChannels) != 0 {
+		t.Errorf("ref channels = %v, want none — ch4/ch5 are digital zero", m.RefChannels)
 	}
 }
 
@@ -119,10 +138,29 @@ func TestBiscuitButtonsAreUnchanged(t *testing.T) {
 	}
 }
 
+func TestRookButtonsResolveByName(t *testing.T) {
+	b := rook.Buttons
+	if len(b.ActionNames) == 0 || len(b.VolumeNames) == 0 {
+		t.Fatal("rook must resolve by name: event2 is a sensor stream that opens fine and never fires")
+	}
+	if b.VolumePath != "/dev/input/event4" {
+		t.Errorf("volume fallback = %s, want event4", b.VolumePath)
+	}
+	if b.MuteKeyCode != 116 {
+		t.Errorf("MuteKeyCode = %d, want 116 (KEY_POWER — no mute key on this board)", b.MuteKeyCode)
+	}
+	if !b.Grab {
+		t.Error("rook must grab: otherwise Android sees the power key and raises the keyguard over the panel")
+	}
+}
+
 // biscuit has a discrete LED under its mute button and must keep driving it;
 // rook has none and must not try, or it logs a fault every boot and toggle.
 func TestMuteLEDIsPerBoard(t *testing.T) {
 	if !biscuit.Buttons.HasMuteLED {
 		t.Error("biscuit has an LED under the mute button (gpio444) — it must still be driven")
+	}
+	if rook.Buttons.HasMuteLED {
+		t.Error("rook has no mute-button LED; attempting it logs a fault every boot")
 	}
 }
