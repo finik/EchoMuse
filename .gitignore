@@ -44,3 +44,7 @@ tls/
 
 # speaker_profile generates its test signals; generate_signals.py is the source
 device/tools/speaker_profile/*.wav
+
+# compile_fast.sh extracts tinyalsa from the pinned compiler image and
+# cross-compiles it here. Third-party source plus built objects — never committed.
+device/.tinyalsa/
