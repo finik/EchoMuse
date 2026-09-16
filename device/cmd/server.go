@@ -26,6 +26,7 @@ import (
 	internalbuttons "github.com/wilbowes/EchoMuse/internal/bindings/buttons"
 	"github.com/wilbowes/EchoMuse/internal/bindings/jack"
 	"github.com/wilbowes/EchoMuse/internal/bindings/mic"
+	"github.com/wilbowes/EchoMuse/internal/bindings/mixer"
 	"github.com/wilbowes/EchoMuse/internal/bindings/speaker"
 	"github.com/wilbowes/EchoMuse/internal/bluetooth"
 	"github.com/wilbowes/EchoMuse/internal/client"
@@ -915,20 +916,61 @@ func wifiRSSI() *int {
 
 // ─── Hardware config ──────────────────────────────────────────────────────────
 
-// applyHardwareConfig runs tinymix commands for fields that map to hardware.
+// adcGainNames are the per-ADC capture gain controls, addressed by NAME.
+//
+// Positional indices cannot be used here. This function runs on every config
+// push, so it is the most frequently executed mixer write in the firmware, and
+// biscuit's ADC_D offsets land on rook's capture ROUTES: 143 is
+// "ADC_A Right Ip Select ADC_A DIF1_R switch". Writing a gain value there tears
+// down capture routing and leaves the microphone dead, with nothing in any log —
+// the same hazard documented in internal/server/mute.go for index 159.
+//
+// Boards with fewer ADCs simply lack the later entries; missing controls are
+// skipped. rook has two (A/B), biscuit four (A-D).
+var (
+	adcDigitalGainNames = []string{
+		"ADC_A Digital Volume Control", "ADC_B Digital Volume Control",
+		"ADC_C Digital Volume Control", "ADC_D Digital Volume Control",
+	}
+	adcMicpgaNames = []string{
+		"ADC_A MICPGA Volume Ctrl", "ADC_B MICPGA Volume Ctrl",
+		"ADC_C MICPGA Volume Ctrl", "ADC_D MICPGA Volume Ctrl",
+	}
+)
+
+// applyHardwareConfig applies config fields that map to mixer controls.
 // Called whenever the controller pushes a config message.
 func applyHardwareConfig(msg config.ConfigMessage) {
+	if msg.AdcDigitalGain <= 0 && msg.AdcMicpga <= 0 {
+		return
+	}
+
+	m, err := mixer.Load(0)
+	if err != nil {
+		// Do NOT fall back to positional indices: on a board whose offsets
+		// differ they address unrelated controls, and for these particular
+		// controls that means a dead microphone. Leaving the gains at whatever
+		// the startup script set is the safe degradation.
+		log.Printf("[config] mixer load failed (%v) — ADC gains left unchanged", err)
+		return
+	}
+
+	apply := func(names []string, value int) {
+		v := strconv.Itoa(value)
+		for _, name := range names {
+			if _, err := m.Index(name); err != nil {
+				continue // board does not have this ADC
+			}
+			if err := m.Set(name, v, v); err != nil {
+				log.Printf("[config] %s = %s: %v", name, v, err)
+			}
+		}
+	}
 	if msg.AdcDigitalGain > 0 {
-		tinymix("89", strconv.Itoa(msg.AdcDigitalGain), strconv.Itoa(msg.AdcDigitalGain))
-		tinymix("107", strconv.Itoa(msg.AdcDigitalGain), strconv.Itoa(msg.AdcDigitalGain))
-		tinymix("125", strconv.Itoa(msg.AdcDigitalGain), strconv.Itoa(msg.AdcDigitalGain))
-		tinymix("143", strconv.Itoa(msg.AdcDigitalGain), strconv.Itoa(msg.AdcDigitalGain))
+		apply(adcDigitalGainNames, msg.AdcDigitalGain)
 	}
 	if msg.AdcMicpga > 0 {
-		tinymix("92", strconv.Itoa(msg.AdcMicpga), strconv.Itoa(msg.AdcMicpga))
-		tinymix("110", strconv.Itoa(msg.AdcMicpga), strconv.Itoa(msg.AdcMicpga))
-		tinymix("128", strconv.Itoa(msg.AdcMicpga), strconv.Itoa(msg.AdcMicpga))
-		tinymix("146", strconv.Itoa(msg.AdcMicpga), strconv.Itoa(msg.AdcMicpga))
+		apply(adcMicpgaNames, msg.AdcMicpga)
 	}
 }
 
@@ -1096,14 +1138,6 @@ func onWakeCrossing(cc *client.ControlClient, srv *server.Server,
 func applyBleConfig(scanner *bluetooth.Scanner) {
 	snap := config.Get().Snapshot()
 	scanner.SetEnabled(snap.BleProxyEnabled != nil && *snap.BleProxyEnabled)
-}
-
-func tinymix(ctl string, args ...string) {
-	cmdArgs := append([]string{"-D", "0", ctl}, args...)
-	out, err := exec.Command("tinymix", cmdArgs...).CombinedOutput()
-	if err != nil {
-		log.Printf("[tinymix] ctl %s failed: %v — %s", ctl, err, string(out))
-	}
 }
 
 func allLEDs(r, g, b uint8) []led.Led {

@@ -160,7 +160,11 @@ func (p *PcmSpeaker) Init() error {
 	// decides what to power at stream open, and an unrouted DAC is powered
 	// down, which presents as a clean "voice stream complete, underruns=0"
 	// into silence. See the codec package.
-	codec.EnsureRoutes()
+	// Resolve the DAPM routes by NAME: biscuit's indices (170..237) do not exist
+	// on rook, so positional writes would silently flip unrelated controls.
+	if err := codec.EnsureRoutesByName(0); err != nil {
+		log.Printf("codec: %v", err)
+	}
 	exec.Command("tinymix", "-D", "0", "61", "0", "0").Run() // mute before touching amp or stream
 
 	device := tinyalsa.NewDevice(cardNr, deviceNr, pcm.Config{

@@ -2,7 +2,8 @@ package server
 
 import (
 	"log"
-	"os/exec"
+
+	"github.com/wilbowes/EchoMuse/internal/bindings/mixer"
 	"sync"
 
 	internalLed "github.com/wilbowes/EchoMuse/internal/bindings/led"
@@ -71,23 +72,46 @@ func (m *muteController) Toggle() {
 	}
 }
 
-// adcMuteCtls are the per-chip ADC mute control pairs, all four codecs
-// (A: ch0/ch1 … D: ch6 + unused). C5 hardware fix (2026-07-07): only chip
-// A (105/106) was muted before, leaving chips B–D — including ch6, the mic
-// wake word and STT actually use — physically hot; the mic stream-stop was
-// what made mute effective. Sibling controls confirmed from the full
-// `tinymix -D 0` dump in device/tools/tinymix_controls_output.txt
-// (captured 2026-07-06).
-var adcMuteCtls = []string{
-	"105", "106", // ADC_A
-	"123", "124", // ADC_B
-	"141", "142", // ADC_C
-	"159", "160", // ADC_D
+// Every ADC mute pair must be driven, not just chip A: muting A alone leaves
+// the other chips physically hot and makes mute depend on the mic stream
+// stopping.
+//
+// Resolved BY NAME, never by positional index: indices belong to the sound
+// card, names to the codec driver. biscuit's ADC_D mute index 159 is
+// "ADC_A Left Ip Select ADC_A DIF1_L switch" on rook — a live capture route.
+// Writing a mute value there tears down capture routing, and unmuting does not
+// restore it, leaving the microphone dead.
+//
+// rook has two ADCs, not four: a TLV320AIC3101 taking four mics differentially
+// across dies A and B, with no ADC_C/ADC_D controls at all.
+var adcMuteNames = []string{
+	"ADC_A Left Mute", "ADC_A Right Mute",
+	"ADC_B Left Mute", "ADC_B Right Mute",
+	"ADC_C Left Mute", "ADC_C Right Mute",
+	"ADC_D Left Mute", "ADC_D Right Mute",
 }
 
 func setAdcMute(val string) {
-	for _, ctl := range adcMuteCtls {
-		exec.Command("tinymix", "-D", "0", ctl, val).Run()
+	m, err := mixer.Load(0)
+	if err != nil {
+		// Degrade to old behaviour, never to a wrong answer: biscuit's indices
+		// are NOT a safe fallback, because on a board with different offsets
+		// they address live capture routes (rook's 159) and muting one leaves
+		// the microphone dead in a way unmuting does not undo. A mute that did
+		// not happen is recoverable and visible; a torn-down capture path is
+		// neither.
+		log.Printf("[mute] mixer load failed (%v) — ADC mute NOT applied", err)
+		return
+	}
+	// Controls this board lacks are skipped silently: rook is expected to be
+	// missing ADC_C/ADC_D.
+	for _, name := range adcMuteNames {
+		if _, err := m.Index(name); err != nil {
+			continue
+		}
+		if err := m.Set(name, val); err != nil {
+			log.Printf("[mute] %s = %s: %v", name, val, err)
+		}
 	}
 }
 
