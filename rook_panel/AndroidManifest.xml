@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  rook_panel — the Echo Spot's screen, owned by us.
+
+  Unlike crown_launcher (Echo Show 8), which deliberately only draws a thin
+  overlay strip because "the screen otherwise belongs to the user's own
+  software", this app IS the home screen: rook runs stock Fire OS whose only
+  UI is Amazon's OOBE, and that gets hidden. So we take the whole display
+  rather than overlaying it, which also means no SYSTEM_ALERT_WINDOW and
+  none of its reinstall-resets-the-appops trap.
+
+  minSdk/targetSdk 22 — Fire OS 5 is Android 5.1, API 22. Anything newer
+  compiles and then fails at runtime on the device.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.echomuse.rookpanel"
+    android:versionCode="1"
+    android:versionName="0.1">
+
+    <uses-sdk android:minSdkVersion="22" android:targetSdkVersion="22" />
+
+    <!-- For the later HA-dashboard WebView. Harmless now, and getting it in
+         early matters: on crown, a missing INTERNET permission meant the uid
+         never joined gid inet (3003) and Android's netfilter owner-match
+         silently dropped every socket() call with no error surfaced. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <application
+        android:label="EchoMuse Panel"
+        android:allowBackup="false"
+        android:hardwareAccelerated="true">
+
+        <activity
+            android:name=".PanelActivity"
+            android:label="EchoMuse Panel"
+            android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen"
+            android:screenOrientation="portrait"
+            android:launchMode="singleInstance"
+            android:configChanges="orientation|screenSize|keyboardHidden">
+            <!-- LAUNCHER so it can be started by hand; HOME + DEFAULT so it
+                 becomes the thing Fire OS shows when nothing else is up. -->
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.HOME" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
