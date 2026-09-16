@@ -127,19 +127,36 @@ func NewServer(buttonController buttons.Controller, microphone mic.Microphone, s
 			time.Sleep(stillWait)
 		}
 
-		// Probe for the LED ring rather than assuming it. A board with no ring
-		// must still boot as a voice assistant, so failure here is not fatal:
-		// everything downstream already tolerates a nil controller, since it is
-		// nil for the first seconds of every boot while this goroutine waits on
-		// uptime.
+		// On a board whose display stands in for the ring (rook), the panel
+		// satisfies the same led.Controller interface, so every existing cue
+		// drives the screen with no parallel code path.
+		//
+		// Selection is on POSITIVE EVIDENCE — a real i2c ring, or a panel that
+		// answered — never by preference. A controller installed speculatively
+		// claims the ring's job on a board that has one, then paints nothing.
+		//
+		// THE RING IS TRIED FIRST, and the order is load-bearing. Both probes
+		// are positive tests, but their costs are wildly different: the i2c
+		// probe is a single sysfs write that fails instantly on a board without
+		// the chip, while the panel probe waits for an Android app that may
+		// still be launching. Panel-first therefore spends the panel's whole
+		// retry budget on every board that has a ring — delaying the Dot's LEDs
+		// by ~12s at boot, on top of the uptime wait below, which is most of a
+		// minute where the ring is the only way to say "no controller yet".
+		// Ring-first puts the waiting on the board that needs it.
 		var (
 			ledController led.Controller
 			ledErr        error
 		)
 		if ring, rerr := internalLed.NewDefaultController(); rerr == nil {
 			ledController = ring
-		} else {
-			ledErr = fmt.Errorf("no i2c ring (%v)", rerr)
+		} else if pc := internalLed.NewPanelController(); pc != nil {
+			if perr := pc.Init(); perr == nil {
+				ledController = pc
+				log.Printf("LED: no i2c ring (%v); display panel answered — using it as the ring", rerr)
+			} else {
+				ledErr = fmt.Errorf("no i2c ring (%v) and no display panel (%v)", rerr, perr)
+			}
 		}
 		if ledErr != nil {
 			// Not fatal: a board with no LED ring must still boot as a voice
