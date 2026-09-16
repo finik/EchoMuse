@@ -3,11 +3,7 @@
 // Card/device numbers, channel counts and mic-array geometry were compile-time
 // constants specific to the Echo Dot gen 2 ("biscuit"), scattered across the
 // bindings and the beamformer. Supporting a second device means naming those
-// values and selecting them at runtime, so one binary can serve every board.
-//
-// Only biscuit is described here. Adding a board is then a new entry rather than
-// an edit to shared code, and this commit changes no behaviour: every value below
-// is the constant it replaced.
+// values and selecting them at runtime, so one binary serves every board.
 //
 // Shape and field names deliberately mirror the profile package proposed for
 // checkers (Echo Show 5) in PR #36, so the two can converge mechanically rather
@@ -166,8 +162,85 @@ var biscuit = &Profile{
 	},
 }
 
+// rook — Echo Spot 1st gen (2017). Measured on hardware; see
+// docs/rook-bringup.md.
+//
+// The capture codec is a TLV320AIC3101 with two ADCs taking four mics
+// differentially, and the driver reports a FIXED six channels
+// (`tinypcminfo -D 0 -d 24`: channels min=max=6). Four mics on ch0-3; ch4 and
+// ch5 are exact digital zero, not a loopback, so there is no hardware AEC
+// reference and no centre mic.
+//
+// WakeChannel is ch2 by MEASUREMENT, not geometry. The four capsules sit within
+// 0.5dB of each other in level and SNR, so loudness says nothing about which
+// one the classifier prefers. Utterances that fire out of 5, two recordings
+// scored offline against the controller's own model and threshold:
+//
+//	         rec1  rec2
+//	ch0        2     2
+//	ch1        1     2
+//	ch2        3     4      <- matches max-of-4 with no protocol change
+//	ch3        1     3
+//	max-of-4   3     5
+//
+// Two alternatives are worse and should not be reinstated: averaging the four
+// comb-filters the speech, since the capsules are physically separated (0.478
+// against 0.906 for the best capsule on one utterance); selecting by energy
+// picks the loudest capsule rather than the clearest.
+//
+// This is a property of which capsule faces the room, so re-measure per unit and
+// after moving a device — and that is the weakness. biscuit also takes its wake
+// stream from a fixed channel, but ch6 is its omnidirectional CENTRE mic and so is
+// placement-independent by construction; this is a rim mic picked in one room. A
+// board with no centre mic really wants runtime selection here, and the criterion
+// the beamformer uses for turns does not transfer: onset energy chose ch0, the
+// loudest, where ch2 scored about twice as well.
+//
+// Do NOT "fix" this by summing the capsules. biscuit selects a single mic too,
+// and that is settled with measurements behind it (see device/CLAUDE.md): at this
+// aperture diffuse-field noise is 0.84-0.99 correlated below 1.5kHz, so a sum has
+// nothing uncorrelated to cancel. Scoring several capsules in parallel and taking
+// the best IS worth doing — max-of-4 fired 8 of 10 against ch2's 7 of 10 — but it
+// costs N times the inference and a protocol change, since the wire carries one
+// mono stream.
+//
+// The capsules' physical bearings are unmeasured, so CandidateAngles below are
+// evenly-spaced placeholders: they affect the REPORTED direction only. Channel
+// selection is by onset energy and is unaffected, and rook has no ring for a
+// direction arc. Measuring the real bearings is an open item.
+var rook = &Profile{
+	Name:  "rook",
+	Model: "Echo Spot Gen 1 (rook)",
+	Mic: Mic{
+		Card: 0, Device: 24,
+		Channels:    6,
+		SampleRate:  16000,
+		PeriodSize:  512,
+		Periods:     5,
+		MicChannels: []int{0, 1, 2, 3},
+		RefChannels: nil,
+		WakeChannel: 2,
+	},
+	Array: Array{
+		CandidateAngles:    []float64{0, 90, 180, 270},
+		DirectionToChannel: []int{0, 1, 2, 3},
+	},
+	// event1 is "mtk-kpd" and carries the action button as KEY_POWER — there is
+	// no mute key on this board. event4 is "keys" and carries volume. event2 is
+	// `hwmdata`, a sensor stream, which is why these are resolved by name.
+	Buttons: Buttons{
+		ActionNames: []string{"mtk-kpd"},
+		VolumeNames: []string{"keys"},
+		ActionPath:  "/dev/input/event1",
+		VolumePath:  "/dev/input/event4",
+		MuteKeyCode: 116, // KEY_POWER
+		Grab:        true,
+	},
+}
+
 var profiles = map[string]*Profile{
 	biscuit.Name: biscuit,
+	rook.Name:    rook,
 }
 
 var (
