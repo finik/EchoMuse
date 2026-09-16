@@ -1,14 +1,18 @@
 //go:build server
 
-// capture_mics: captures raw 9-channel audio from the biscuit mic array
-// and writes it to /data/local/tmp/capture.raw for offline analysis.
+// capture_mics: captures the raw mic array to /data/local/tmp/capture.raw for
+// offline analysis.
 //
 // Usage:
-//   capture_mics [seconds]   default: 5
+//   capture_mics [seconds] [channels]   default: 5s, 9 channels
 //
-// Output format: raw interleaved S24_3LE, 9 channels, 16kHz
-// Each frame: 9 samples × 3 bytes = 27 bytes
-// Each period (512 frames): 13,824 bytes
+// Output format: raw interleaved S24_3LE, 16kHz, `channels` channels — which is
+// board-specific (biscuit 9, rook 6) and so is an ARGUMENT rather than a
+// constant: a tool that has to be edited and rebuilt per board gets run
+// unedited on the other one, and a wrong channel count is silent. The stride
+// lands mid-sample and every value is garbage that still looks like audio.
+// analyse_capture.py must be given the matching --channels for the same reason.
+// Frame size is channels x 3 bytes; a period is 512 frames.
 //
 // Build inside echomuse-compiler Docker container:
 //   go build -tags server -o capture_mics .
@@ -29,7 +33,6 @@ import (
 const (
 	cardNr      = 0
 	deviceNr    = 24
-	channels    = 9
 	sampleRate  = 16000
 	periodSize  = 512
 	periodCount = 5
@@ -38,12 +41,20 @@ const (
 
 func main() {
 	durationSecs := 5
+	channels := 9 // biscuit; rook reports a fixed 6 (tinypcminfo -D 0 -d 24)
 	if len(os.Args) > 1 {
 		n, err := strconv.Atoi(os.Args[1])
 		if err != nil || n < 1 || n > 60 {
-			log.Fatalf("usage: capture_mics [seconds 1-60]")
+			log.Fatalf("usage: capture_mics [seconds 1-60] [channels 1-16]")
 		}
 		durationSecs = n
+	}
+	if len(os.Args) > 2 {
+		n, err := strconv.Atoi(os.Args[2])
+		if err != nil || n < 1 || n > 16 {
+			log.Fatalf("usage: capture_mics [seconds 1-60] [channels 1-16]")
+		}
+		channels = n
 	}
 
 	// Must stop the mixer service to release the ALSA capture device —

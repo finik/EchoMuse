@@ -50,3 +50,6 @@ device/tools/speaker_profile/*.wav
 coverage.out
 coverage.json
 *.cover
+# compile_fast.sh extracts tinyalsa from the pinned compiler image and
+# cross-compiles it here. Third-party source plus built objects — never committed.
+device/.tinyalsa/
