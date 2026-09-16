@@ -1,6 +1,7 @@
 package server
 
 import (
+	"fmt"
 	"log"
 	"math"
 	"sync"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	internalLed "github.com/wilbowes/EchoMuse/internal/bindings/led"
+	"github.com/wilbowes/EchoMuse/internal/profile"
 	"github.com/wilbowes/EchoMuse/pkg/buttons"
 	"github.com/wilbowes/EchoMuse/pkg/led"
 	"github.com/wilbowes/EchoMuse/pkg/mic"
@@ -125,9 +127,29 @@ func NewServer(buttonController buttons.Controller, microphone mic.Microphone, s
 			time.Sleep(stillWait)
 		}
 
-		ledController, err := internalLed.NewDefaultController()
-		if err != nil {
-			log.Fatalf("Failed to initialize LED controller: %v", err)
+		// Probe for the LED ring rather than assuming it. A board with no ring
+		// must still boot as a voice assistant, so failure here is not fatal:
+		// everything downstream already tolerates a nil controller, since it is
+		// nil for the first seconds of every boot while this goroutine waits on
+		// uptime.
+		var (
+			ledController led.Controller
+			ledErr        error
+		)
+		if ring, rerr := internalLed.NewDefaultController(); rerr == nil {
+			ledController = ring
+		} else {
+			ledErr = fmt.Errorf("no i2c ring (%v)", rerr)
+		}
+		if ledErr != nil {
+			// Not fatal: a board with no LED ring must still boot as a voice
+			// assistant. rook has no ring at all — its round LCD replaces it —
+			// so NewDefaultController finds no i2c ring driver. Everything
+			// downstream already tolerates a nil controller, since it is nil for
+			// the first seconds of every boot while this goroutine waits on
+			// uptime; the ring simply stays absent.
+			log.Printf("LED controller unavailable, continuing without the ring: %v", ledErr)
+			return
 		}
 
 		server.ledMu.Lock()
@@ -135,11 +157,15 @@ func NewServer(buttonController buttons.Controller, microphone mic.Microphone, s
 		server.ledMu.Unlock()
 		clearLeds(ledController)
 
-		// Discrete red LED under the mic-off button (GPIO, separate from
-		// the ring) — export + off. Non-fatal: an unmuted boot without a
-		// button LED is cosmetic, everything else still works.
-		if err := internalLed.InitMuteButtonLED(); err != nil {
-			log.Printf("Mute button LED init failed: %v", err)
+		// Discrete red LED under the mic-off button (GPIO, separate from the
+		// ring) — export + off. Skipped entirely on a board without one, rather
+		// than attempted and logged as a failure every boot. Still non-fatal
+		// where it is expected: an unmuted boot without a button LED is
+		// cosmetic.
+		if profile.Active().Buttons.HasMuteLED {
+			if err := internalLed.InitMuteButtonLED(); err != nil {
+				log.Printf("Mute button LED init failed: %v", err)
+			}
 		}
 
 		// A muted state restored from state.json was applied to the ADC

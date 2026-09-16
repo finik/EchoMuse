@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	internalLed "github.com/wilbowes/EchoMuse/internal/bindings/led"
+	"github.com/wilbowes/EchoMuse/internal/profile"
 	"github.com/wilbowes/EchoMuse/pkg/led"
 )
 
@@ -148,6 +149,9 @@ func (m *muteController) applyUnmute() {
 // transition for free. Direct binding call, same precedent as setAdcMute's
 // tinymix exec above.
 func setMuteButtonLED(on bool) {
+	if !profile.Active().Buttons.HasMuteLED {
+		return
+	}
 	if err := internalLed.SetMuteButtonLED(on); err != nil {
 		log.Printf("Mute button LED: %v", err)
 	}

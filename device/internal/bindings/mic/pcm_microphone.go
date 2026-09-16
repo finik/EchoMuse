@@ -10,14 +10,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/wilbowes/EchoMuse/internal/bindings/codec"
-	pkgmic "github.com/wilbowes/EchoMuse/pkg/mic"
 	"github.com/Binozo/GoTinyAlsa/pkg/pcm"
 	"github.com/Binozo/GoTinyAlsa/pkg/tinyalsa"
+	"github.com/wilbowes/EchoMuse/internal/bindings/codec"
+	"github.com/wilbowes/EchoMuse/internal/profile"
+	pkgmic "github.com/wilbowes/EchoMuse/pkg/mic"
 )
-
-const cardNr = 0
-const deviceNr = 24
 
 // PcmMicrophone opens the ALSA device once and fans out to multiple subscribers.
 // Callers register via Listen(); each gets their own buffered channel.
@@ -30,11 +28,18 @@ type PcmMicrophone struct {
 // NewMicrophone returns the pre-configured microphone alsa device and starts
 // the permanent ALSA read loop.
 func NewMicrophone() (*PcmMicrophone, error) {
-	device := tinyalsa.NewDevice(cardNr, deviceNr, pcm.Config{
-		Channels:    9,
-		SampleRate:  16000,
-		PeriodSize:  512,
-		PeriodCount: 5,
+	// Capture geometry comes from the board profile, not from constants: the
+	// channel count is hardware (biscuit 9 across four ADCs, rook 6 across two
+	// feeding 4 mics differentially) and asking for the wrong one is silent —
+	// the frame stride lands mid-sample and every value downstream is garbage.
+	mp := profile.Active().Mic
+	log.Printf("[mic] %s: card %d device %d, %dch @ %dHz S24_3LE",
+		profile.Active().Name, mp.Card, mp.Device, mp.Channels, mp.SampleRate)
+	device := tinyalsa.NewDevice(mp.Card, mp.Device, pcm.Config{
+		Channels:    mp.Channels,
+		SampleRate:  mp.SampleRate,
+		PeriodSize:  mp.PeriodSize,
+		PeriodCount: mp.Periods,
 		Format:      tinyalsa.PCM_FORMAT_S24_3LE,
 	})
 	m := &PcmMicrophone{
@@ -57,7 +62,12 @@ func (p *PcmMicrophone) Init() error {
 	// Without this the ADCs are powered down and capture returns the I2S bus's
 	// own noise floor — with a perfectly healthy ALSA clock, which is what
 	// makes it so hard to see. See the codec package.
-	codec.EnsureRoutes()
+	// Resolve the DAPM routes by NAME: biscuit's indices (170..237) do not exist
+	// on rook, whose DIF1 capture routes sit at 136/143/152/159 (ADC_A/B only),
+	// so positional writes would silently flip unrelated controls.
+	if err := codec.EnsureRoutesByName(0); err != nil {
+		log.Printf("codec: %v", err)
+	}
 	go p.readLoop()
 	return nil
 }

@@ -1,13 +1,23 @@
 package beamformer
 
-import "testing"
+import (
+	"testing"
 
-// warmBeamformer returns a Beamformer with baseline warmed up and a uniform
-// noise floor, as if it had been running in a quiet room.
-func warmBeamformer(baseline float64) *Beamformer {
-	b := New()
+	"github.com/wilbowes/EchoMuse/internal/profile"
+)
+
+// warmBeamformer returns a Beamformer for the named board with its baseline
+// warmed up and a uniform noise floor, as if it had been running in a quiet
+// room.
+func warmBeamformer(t *testing.T, board string, baseline float64) *Beamformer {
+	t.Helper()
+	p := profile.ByName(board)
+	if p == nil {
+		t.Fatalf("no profile for %q", board)
+	}
+	b := NewFor(p)
 	b.baselineReady = 100
-	for di := 0; di < nDirections; di++ {
+	for di := 0; di < b.nDirections; di++ {
 		b.energyBaseline[di] = baseline
 	}
 	return b
@@ -18,11 +28,11 @@ func warmBeamformer(baseline float64) *Beamformer {
 // since decayed and (thanks to a TV) now points at direction 5. Live onset
 // selection picks the TV; lock-back must pick the speaker.
 func TestLockBackPicksPastBurst(t *testing.T) {
-	b := warmBeamformer(1e-6)
+	b := warmBeamformer(t, "biscuit", 1e-6)
 
 	// Fill the ring with baseline-level noise…
 	for i := 0; i < historyPeriods; i++ {
-		for di := 0; di < nDirections; di++ {
+		for di := 0; di < b.nDirections; di++ {
 			b.energyHistory[i][di] = 1e-6
 		}
 	}
@@ -46,9 +56,9 @@ func TestLockBackPicksPastBurst(t *testing.T) {
 
 	b.Lock(true)
 
-	if b.lockedChannel != directionToChannel[2] {
+	if b.lockedChannel != b.directionToChannel[2] {
 		t.Fatalf("lock-back picked ch%d, want ch%d (direction 2 burst)",
-			b.lockedChannel, directionToChannel[2])
+			b.lockedChannel, b.directionToChannel[2])
 	}
 }
 
@@ -56,22 +66,22 @@ func TestLockBackPicksPastBurst(t *testing.T) {
 // (carried into the ready state quickly) but ring not yet populated. Must
 // use the live onset ratio, not a zero-filled ring.
 func TestLockFallsBackToOnsetRatioWithoutHistory(t *testing.T) {
-	b := warmBeamformer(1e-6)
+	b := warmBeamformer(t, "biscuit", 1e-6)
 	b.historyCount = 0
 	b.energySmooth[4] = 3e-4 // live onset on direction 4
 
 	b.Lock(true)
 
-	if b.lockedChannel != directionToChannel[4] {
+	if b.lockedChannel != b.directionToChannel[4] {
 		t.Fatalf("fallback picked ch%d, want ch%d (live onset direction 4)",
-			b.lockedChannel, directionToChannel[4])
+			b.lockedChannel, b.directionToChannel[4])
 	}
 }
 
 // TestLockDisabledIsNoOp — beamforming off must leave the channel unlocked
-// (ch6 omni output path).
+// (omni output path).
 func TestLockDisabledIsNoOp(t *testing.T) {
-	b := warmBeamformer(1e-6)
+	b := warmBeamformer(t, "biscuit", 1e-6)
 	b.historyCount = historyPeriods
 	b.energyHistory[0][3] = 1.0
 
@@ -85,7 +95,7 @@ func TestLockDisabledIsNoOp(t *testing.T) {
 // TestBurstRatioTopNMean checks the allocation-free partial selection:
 // history 1..64 on direction 0 → top 8 are 57..64, mean 60.5.
 func TestBurstRatioTopNMean(t *testing.T) {
-	b := warmBeamformer(1.0)
+	b := warmBeamformer(t, "biscuit", 1.0)
 	for i := 0; i < historyPeriods; i++ {
 		b.energyHistory[i][0] = float64(i + 1)
 	}
@@ -101,7 +111,7 @@ func TestBurstRatioTopNMean(t *testing.T) {
 // TestBurstRatioPartialHistory — fewer samples than burstTopN averages what
 // exists instead of diluting with zeros.
 func TestBurstRatioPartialHistory(t *testing.T) {
-	b := warmBeamformer(1.0)
+	b := warmBeamformer(t, "biscuit", 1.0)
 	b.energyHistory[0][0] = 4.0
 	b.energyHistory[1][0] = 2.0
 	b.historyCount = 2
@@ -113,29 +123,78 @@ func TestBurstRatioPartialHistory(t *testing.T) {
 	}
 }
 
-// ─── Hardware echo reference (#385) ───────────────────────────────────────────
+// ─── Board geometry ──────────────────────────────────────────────────────────
 
-// raw9 builds one period of 9-channel S24_3LE with a per-channel constant, so
-// each channel is identifiable by value alone.
-func raw9(frames int, valueFor func(ch int) int32) []byte {
-	buf := make([]byte, frames*frameSize)
+// The whole point of the profile: one binary, two boards, and the shipped one
+// keeps the numbers it has always had.
+func TestGeometryComesFromTheProfile(t *testing.T) {
+	for _, tc := range []struct {
+		board                string
+		nChannels, frameSize int
+		nDirections          int
+		wakeCh, echoRef      int
+	}{
+		{"biscuit", 9, 27, 6, 6, 8},
+	} {
+		t.Run(tc.board, func(t *testing.T) {
+			b := NewFor(profile.ByName(tc.board))
+			if b.nChannels != tc.nChannels {
+				t.Errorf("nChannels = %d, want %d", b.nChannels, tc.nChannels)
+			}
+			if b.frameSize != tc.frameSize {
+				t.Errorf("frameSize = %d, want %d", b.frameSize, tc.frameSize)
+			}
+			if b.nDirections != tc.nDirections {
+				t.Errorf("nDirections = %d, want %d", b.nDirections, tc.nDirections)
+			}
+			if b.wakeCh != tc.wakeCh {
+				t.Errorf("wakeCh = %d, want %d", b.wakeCh, tc.wakeCh)
+			}
+			if b.echoRefCh != tc.echoRef {
+				t.Errorf("echoRefCh = %d, want %d", b.echoRefCh, tc.echoRef)
+			}
+			// Per-direction state must be sized for THIS board. A short slice
+			// panics on the mic goroutine; a long one silently averages a
+			// direction that does not exist.
+			if len(b.energySmooth) != tc.nDirections ||
+				len(b.energyBaseline) != tc.nDirections ||
+				len(b.chanBuf) != tc.nDirections ||
+				len(b.hfBuf) != tc.nDirections {
+				t.Errorf("per-direction state mis-sized: smooth=%d baseline=%d chan=%d hf=%d, want %d",
+					len(b.energySmooth), len(b.energyBaseline), len(b.chanBuf), len(b.hfBuf), tc.nDirections)
+			}
+			for i := range b.energyHistory {
+				if len(b.energyHistory[i]) != tc.nDirections {
+					t.Fatalf("energyHistory[%d] has %d directions, want %d",
+						i, len(b.energyHistory[i]), tc.nDirections)
+				}
+			}
+		})
+	}
+}
+
+// ─── Hardware echo reference (#385) ──────────────────────────────────────────
+
+// rawPeriod builds one period of S24_3LE for b's frame size, with a
+// per-channel constant so each channel is identifiable by value alone.
+func rawPeriod(b *Beamformer, frames int, valueFor func(ch int) int32) []byte {
+	buf := make([]byte, frames*b.frameSize)
 	for f := 0; f < frames; f++ {
-		for ch := 0; ch < nChannels; ch++ {
+		for ch := 0; ch < b.nChannels; ch++ {
 			v := valueFor(ch)
-			b := f*frameSize + ch*byteSample
-			buf[b] = byte(v)
-			buf[b+1] = byte(v >> 8)
-			buf[b+2] = byte(v >> 16)
+			i := f*b.frameSize + ch*byteSample
+			buf[i] = byte(v)
+			buf[i+1] = byte(v >> 8)
+			buf[i+2] = byte(v >> 16)
 		}
 	}
 	return buf
 }
 
-func TestEchoRefReadsChannel8(t *testing.T) {
-	b := New()
-	// Every channel gets a distinct value; ch8 gets one we can recognise.
-	raw := raw9(periodFrames, func(ch int) int32 {
-		if ch == echoRefCh {
+func TestEchoRefReadsTheReferenceChannel(t *testing.T) {
+	b := NewFor(profile.ByName("biscuit"))
+	raw := rawPeriod(b, periodFrames, func(ch int) int32 {
+		if ch == b.echoRefCh {
 			return 0x200000 // +2097152 of 2^23 → 8192 after the 24→16 shift
 		}
 		return int32(ch) << 12
@@ -157,11 +216,10 @@ func TestEchoRefReadsChannel8(t *testing.T) {
 // clipping, which does not merely cancel badly: it teaches the adaptive
 // filter a distorted echo path.
 func TestEchoRefIsUnityGain(t *testing.T) {
-	b := New()
-	// Near full scale on ch8. Any gain above unity clamps this.
-	raw := raw9(periodFrames, func(ch int) int32 {
-		if ch == echoRefCh {
-			return 0x7F0000 >> 0 // 8323072 — close to the 2^23 ceiling
+	b := NewFor(profile.ByName("biscuit"))
+	raw := rawPeriod(b, periodFrames, func(ch int) int32 {
+		if ch == b.echoRefCh {
+			return 0x7F0000 // 8323072 — close to the 2^23 ceiling
 		}
 		return 0
 	})
@@ -176,8 +234,29 @@ func TestEchoRefIsUnityGain(t *testing.T) {
 }
 
 func TestEchoRefRejectsShortBuffer(t *testing.T) {
-	b := New()
-	if out := b.EchoRef(make([]byte, frameSize-1)); out != nil {
+	b := NewFor(profile.ByName("biscuit"))
+	if out := b.EchoRef(make([]byte, b.frameSize-1)); out != nil {
 		t.Fatal("a short period must report no reference, not a partial one")
+	}
+}
+
+// The wake stream takes the profile's measured capsule, not a hardcoded one.
+func TestWakeSelectUsesTheProfileChannel(t *testing.T) {
+	for _, board := range []string{"biscuit"} {
+		t.Run(board, func(t *testing.T) {
+			b := NewFor(profile.ByName(board))
+			// Only the wake channel carries signal; everything else is silent.
+			raw := rawPeriod(b, periodFrames, func(ch int) int32 {
+				if ch == b.wakeCh {
+					return 0x080000
+				}
+				return 0
+			})
+			out := b.wakeSelect(raw, 1.0)
+			got := int16(uint16(out[0]) | uint16(out[1])<<8)
+			if got == 0 {
+				t.Fatalf("wake stream is silent — it is not reading ch%d", b.wakeCh)
+			}
+		})
 	}
 }
