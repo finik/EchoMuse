@@ -34,6 +34,7 @@ import (
 	"github.com/wilbowes/EchoMuse/internal/cue"
 	"github.com/wilbowes/EchoMuse/internal/listen"
 	"github.com/wilbowes/EchoMuse/internal/platform"
+	"github.com/wilbowes/EchoMuse/internal/profile"
 	"github.com/wilbowes/EchoMuse/internal/server"
 	"github.com/wilbowes/EchoMuse/internal/wakeword"
 	"github.com/wilbowes/EchoMuse/internal/wakeword/shadow"
@@ -1167,13 +1168,13 @@ func applyHardwareConfig(msg config.ConfigMessage) {
 	// meeting a controller that omits the key behaves as it always did.
 	if msg.AdcDigitalGain != nil {
 		g := strconv.Itoa(*msg.AdcDigitalGain)
-		for _, adc := range []string{"A", "B", "C", "D"} {
+		for _, adc := range profile.Active().Mic.ADCs {
 			mixer.Set("ADC_"+adc+" Digital Volume Control", g)
 		}
 	}
 	if msg.AdcMicpga != nil {
 		g := strconv.Itoa(*msg.AdcMicpga)
-		for _, adc := range []string{"A", "B", "C", "D"} {
+		for _, adc := range profile.Active().Mic.ADCs {
 			mixer.Set("ADC_"+adc+" MICPGA Volume Ctrl", g)
 		}
 	}

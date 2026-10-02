@@ -21,9 +21,10 @@ package profile
 
 import (
 	"log"
-	"os/exec"
 	"strings"
 	"sync"
+
+	"github.com/wilbowes/EchoMuse/pkg/board"
 )
 
 // Mic describes the capture stream.
@@ -42,6 +43,15 @@ type Mic struct {
 	// RefChannels carry a hardware loopback of the playback signal, suitable
 	// as an AEC reference. Empty when the device provides no such feed.
 	RefChannels []int
+
+	// ADCs are the capture converters' control-name suffixes, in order, as the
+	// codec driver spells them: biscuit's AIC32x4 has four ("A".."D"), rook's
+	// AIC3101 has two. Everything that addresses a converter — the mute, the
+	// digital gain, the MICPGA gain — iterates this rather than a fixed A..D,
+	// because on a two-ADC board half of those writes fail. The gain path
+	// swallows that silently and the mute path logs "4 of 8 failed" on every
+	// toggle, which is the log noise that trains people to ignore the log.
+	ADCs []string
 
 	// WakeChannel is the channel the always-on wake stream listens through.
 	//
@@ -114,7 +124,8 @@ func (a Array) Directions() int { return len(a.CandidateAngles) }
 
 // Profile is the hardware description for one device.
 type Profile struct {
-	// Name matches ro.product.device.
+	// Name matches pkg/board's Board.ID, which is the firmware's one board
+	// identity and is detected from Amazon's idme rather than a getprop.
 	Name string
 	// Model is decorative — logs and dashboards only. Never branch on it;
 	// branch on a capability or on a probe.
@@ -143,6 +154,7 @@ var biscuit = &Profile{
 		Periods:     5,
 		MicChannels: []int{0, 1, 2, 3, 4, 5, 6},
 		RefChannels: []int{8},
+		ADCs:        []string{"A", "B", "C", "D"},
 		WakeChannel: 6,
 	},
 	Array: Array{
@@ -219,6 +231,7 @@ var rook = &Profile{
 		Periods:     5,
 		MicChannels: []int{0, 1, 2, 3},
 		RefChannels: nil,
+		ADCs:        []string{"A", "B"},
 		WakeChannel: 2,
 	},
 	Array: Array{
@@ -250,18 +263,26 @@ var (
 
 // Active returns the profile for this device, memoised.
 //
-// Falls back to biscuit for an unrecognised board. That is deliberate: the
-// existing fleet is biscuit, so an unknown name must behave exactly as this
-// firmware did before profiles existed, rather than refusing to start. The
-// fallback is logged, because a device silently running another board's
+// Identity comes from pkg/board, so there is exactly ONE board detection in
+// the firmware and this package only carries the audio facts that go with it.
+// Keying off `getprop ro.product.device` instead — which this did until the
+// rebase onto #541 — would have been a second source of truth for the same
+// question, and a worse one: getprop needs Android's property service, so it
+// returns nothing under emOS and every emOS device would silently take the
+// fallback below.
+//
+// Falls back to biscuit when no board matches. That is deliberate: the
+// existing fleet is biscuit, so an unrecognised device must behave exactly as
+// this firmware did before profiles existed, rather than refusing to start.
+// The fallback is logged, because a device silently running another board's
 // geometry is the failure this package exists to prevent.
 func Active() *Profile {
-	once.Do(func() { active = forName(prop("ro.product.device")) })
+	once.Do(func() { active = forName(board.IDOf(board.Detect(""))) })
 	return active
 }
 
-// forName maps a ro.product.device value to a profile. Split out from Active so
-// the mapping is testable without a device.
+// forName maps a board id (pkg/board's Board.ID) to a profile. Split out from
+// Active so the mapping is testable without a device.
 func forName(name string) *Profile {
 	if p, ok := profiles[strings.TrimSpace(name)]; ok {
 		return p
@@ -282,10 +303,3 @@ func Names() []string {
 	return out
 }
 
-func prop(key string) string {
-	out, err := exec.Command("getprop", key).Output()
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(out))
-}
