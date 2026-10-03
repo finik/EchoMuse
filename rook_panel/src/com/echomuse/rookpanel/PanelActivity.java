@@ -4,6 +4,7 @@ import android.app.Activity;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
+import android.graphics.Path;
 import android.graphics.RectF;
 import android.graphics.Typeface;
 import android.net.LocalServerSocket;
@@ -12,6 +13,7 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.WindowManager;
 
@@ -51,6 +53,9 @@ public class PanelActivity extends Activity {
      */
     static final String SOCKET_NAME = "com.echomuse.rookpanel/state";
 
+    /** How long a tap holds the day brightness. The root script reads this. */
+    private static final long TAP_HOLD_MS = 20_000;
+
     private PanelView view;
 
     @Override
@@ -69,8 +74,33 @@ public class PanelActivity extends Activity {
           | WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD
           | WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON);
         view = new PanelView(this);
+        view.setOnTouchListener(new View.OnTouchListener() {
+            @Override public boolean onTouch(View v, MotionEvent e) {
+                if (e.getAction() == MotionEvent.ACTION_DOWN) holdBrightness();
+                return true;
+            }
+        });
         setContentView(view);
         new Thread(new StateServer(view), "state-server").start();
+    }
+
+    /**
+     * A tap asks the root backlight script for day brightness for TAP_HOLD_MS.
+     *
+     * Night dim used to be a window attribute set on the UI thread. That call
+     * blocked inside the window manager at midnight and froze the clock on
+     * the last frame, 00:00. The panel must not touch window brightness.
+     * The file is in this app's own directory, which root can read and the
+     * app can write. A failed write must not take the clock down with it.
+     */
+    private void holdBrightness() {
+        try {
+            java.io.File f = new java.io.File(getFilesDir(), "bright_until");
+            java.io.FileOutputStream out = new java.io.FileOutputStream(f);
+            out.write(Long.toString(System.currentTimeMillis() + TAP_HOLD_MS).getBytes("UTF-8"));
+            out.close();
+        } catch (Exception ignored) {
+        }
     }
 
     // ── the drawing ──────────────────────────────────────────────────────────
@@ -78,6 +108,8 @@ public class PanelActivity extends Activity {
     static class PanelView extends View {
         private final Paint clockPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint datePaint  = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint wxPaint    = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint iconPaint  = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint ringPaint  = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final SimpleDateFormat timeFmt = new SimpleDateFormat("HH:mm", Locale.US);
         private final SimpleDateFormat dateFmt = new SimpleDateFormat("EEE d MMM", Locale.US);
@@ -93,6 +125,11 @@ public class PanelActivity extends Activity {
          * meter is the ring's brightness tracking speaker RMS. Both are shape,
          * not hue, and a single colour would erase them.
          */
+        /** Outside temperature in Celsius, and which picture to draw.
+         *  wxKind null means the controller has not said. */
+        private volatile int wxTemp = 0;
+        private volatile String wxKind = null;
+        private volatile String weather = "";
         private volatile int[] ring = new int[12];
         /** The frame we are fading FROM, and when the current one arrived. */
         private volatile int[] ringPrev = new int[12];
@@ -109,6 +146,10 @@ public class PanelActivity extends Activity {
             clockPaint.setTextAlign(Paint.Align.CENTER);
             datePaint.setColor(0xFF8A8A8A);
             datePaint.setTextAlign(Paint.Align.CENTER);
+            wxPaint.setColor(0xFFD0D0D0);
+            wxPaint.setTextAlign(Paint.Align.CENTER);
+            iconPaint.setStrokeCap(Paint.Cap.ROUND);
+            iconPaint.setStrokeJoin(Paint.Join.ROUND);
             ringPaint.setStyle(Paint.Style.STROKE);
             ringPaint.setStrokeCap(Paint.Cap.ROUND);
 
@@ -137,7 +178,126 @@ public class PanelActivity extends Activity {
             ui.post(new Runnable() { @Override public void run() { invalidate(); } });
         }
 
+        void setWeather(String line) {
+            this.weather = line == null ? "" : line;
+            this.wxKind = null;
+            ui.post(new Runnable() { @Override public void run() { invalidate(); } });
+        }
+
+        void setConditions(int temp, String kind) {
+            this.wxTemp = temp;
+            this.wxKind = kind == null || kind.length() == 0 ? "cloud" : kind;
+            this.weather = "";
+            ui.post(new Runnable() { @Override public void run() { invalidate(); } });
+        }
+
         void clearRing() { setRing(new int[12]); }
+
+        void clearFace() {
+            clearRing();
+            setWeather("");
+        }
+
+        /** Icon, then the Celsius number, centred under the date. */
+        private void drawConditions(Canvas c, float cx, float cy, float r) {
+            float icon = r * 0.16f;
+            String label = wxTemp + "\u00b0";
+            wxPaint.setTextSize(r * 0.14f);
+            float textW = wxPaint.measureText(label);
+            float gap = r * 0.035f;
+            float left = cx - (icon * 2f + gap + textW) / 2f;
+            drawSky(c, left + icon, cy, icon, wxKind);
+            Paint.FontMetrics fm = wxPaint.getFontMetrics();
+            c.drawText(label, left + icon * 2f + gap + textW / 2f,
+                cy - (fm.ascent + fm.descent) / 2f, wxPaint);
+        }
+
+        private void drawSky(Canvas c, float x, float y, float s, String kind) {
+            if ("sun".equals(kind)) {
+                sun(c, x, y, s * 0.42f, s);
+            } else if ("fair".equals(kind)) {
+                sun(c, x - s * 0.22f, y - s * 0.18f, s * 0.28f, s * 0.72f);
+                cloud(c, x + s * 0.08f, y + s * 0.12f, s * 0.78f, 0xFFE4E4E4);
+            } else if ("fog".equals(kind)) {
+                cloud(c, x, y - s * 0.12f, s * 0.72f, 0xFFB0B0B0);
+                bars(c, x, y + s * 0.42f, s * 0.7f);
+            } else if ("rain".equals(kind)) {
+                cloud(c, x, y - s * 0.16f, s * 0.78f, 0xFFD8D8D8);
+                drops(c, x, y + s * 0.28f, s, false);
+            } else if ("snow".equals(kind)) {
+                cloud(c, x, y - s * 0.16f, s * 0.78f, 0xFFE8E8E8);
+                drops(c, x, y + s * 0.28f, s, true);
+            } else if ("storm".equals(kind)) {
+                cloud(c, x, y - s * 0.18f, s * 0.78f, 0xFFC8C8C8);
+                bolt(c, x + s * 0.02f, y + s * 0.18f, s * 0.42f);
+            } else {
+                cloud(c, x, y, s * 0.9f, 0xFFE0E0E0);
+            }
+        }
+
+        private void sun(Canvas c, float x, float y, float rad, float ray) {
+            iconPaint.setStyle(Paint.Style.FILL);
+            iconPaint.setColor(0xFFFFD15C);
+            c.drawCircle(x, y, rad, iconPaint);
+            iconPaint.setStyle(Paint.Style.STROKE);
+            iconPaint.setStrokeWidth(Math.max(2f, rad * 0.22f));
+            for (int i = 0; i < 8; i++) {
+                double a = i * Math.PI / 4.0;
+                float x1 = x + (float) Math.cos(a) * (rad * 1.45f);
+                float y1 = y + (float) Math.sin(a) * (rad * 1.45f);
+                float x2 = x + (float) Math.cos(a) * ray;
+                float y2 = y + (float) Math.sin(a) * ray;
+                c.drawLine(x1, y1, x2, y2, iconPaint);
+            }
+        }
+
+        private void cloud(Canvas c, float x, float y, float w, int color) {
+            iconPaint.setStyle(Paint.Style.FILL);
+            iconPaint.setColor(color);
+            float h = w * 0.62f;
+            c.drawCircle(x - w * 0.22f, y, h * 0.42f, iconPaint);
+            c.drawCircle(x + w * 0.08f, y - h * 0.16f, h * 0.52f, iconPaint);
+            c.drawCircle(x + w * 0.32f, y + h * 0.02f, h * 0.36f, iconPaint);
+            c.drawRoundRect(new RectF(x - w * 0.48f, y - h * 0.05f, x + w * 0.5f, y + h * 0.38f),
+                h * 0.2f, h * 0.2f, iconPaint);
+        }
+
+        private void drops(Canvas c, float x, float y, float s, boolean snow) {
+            iconPaint.setStyle(snow ? Paint.Style.FILL : Paint.Style.STROKE);
+            iconPaint.setColor(snow ? 0xFFFFFFFF : 0xFF8EC8FF);
+            iconPaint.setStrokeWidth(Math.max(2f, s * 0.08f));
+            float[] dx = {-0.28f, 0.02f, 0.30f};
+            for (int i = 0; i < 3; i++) {
+                float px = x + dx[i] * s;
+                if (snow) {
+                    c.drawCircle(px, y + (i == 1 ? s * 0.08f : 0), s * 0.07f, iconPaint);
+                } else {
+                    c.drawLine(px, y, px - s * 0.08f, y + s * 0.22f, iconPaint);
+                }
+            }
+        }
+
+        private void bars(Canvas c, float x, float y, float w) {
+            iconPaint.setStyle(Paint.Style.STROKE);
+            iconPaint.setColor(0xFFB0B0B0);
+            iconPaint.setStrokeWidth(Math.max(2f, w * 0.08f));
+            c.drawLine(x - w / 2f, y - w * 0.12f, x + w * 0.35f, y - w * 0.12f, iconPaint);
+            c.drawLine(x - w * 0.35f, y + w * 0.08f, x + w / 2f, y + w * 0.08f, iconPaint);
+        }
+
+        private void bolt(Canvas c, float x, float y, float h) {
+            iconPaint.setStyle(Paint.Style.FILL);
+            iconPaint.setColor(0xFFFFD15C);
+            Path p = new Path();
+            p.moveTo(x + h * 0.12f, y);
+            p.lineTo(x - h * 0.28f, y + h * 0.55f);
+            p.lineTo(x + h * 0.02f, y + h * 0.55f);
+            p.lineTo(x - h * 0.16f, y + h);
+            p.lineTo(x + h * 0.36f, y + h * 0.38f);
+            p.lineTo(x + h * 0.04f, y + h * 0.38f);
+            p.close();
+            c.drawPath(p, iconPaint);
+        }
 
         @Override protected void onDraw(Canvas c) {
             int w = getWidth(), h = getHeight();
@@ -154,6 +314,16 @@ public class PanelActivity extends Activity {
             float baseline = cy - (fm.ascent + fm.descent) / 2f;
             c.drawText(t, cx, baseline, clockPaint);
             c.drawText(dateFmt.format(new Date()), cx, baseline + r * 0.26f, datePaint);
+            String kind = wxKind;
+            if (kind != null) {
+                drawConditions(c, cx, baseline + r * 0.46f, r);
+            } else {
+                String wx = weather;
+                if (wx != null && wx.length() > 0) {
+                    wxPaint.setTextSize(r * 0.11f);
+                    c.drawText(wx, cx, baseline + r * 0.44f, wxPaint);
+                }
+            }
 
             int[] px = ring;
             int[] prev = ringPrev;
@@ -252,7 +422,7 @@ public class PanelActivity extends Activity {
                     if (s != null) try { s.close(); } catch (IOException ignored) {}
                     // Daemon gone: clear the ring, or it sticks on whatever the
                     // last state was and lies about the device listening.
-                    view.clearRing();
+                    view.clearFace();
                 }
             }
         }
@@ -260,11 +430,27 @@ public class PanelActivity extends Activity {
         private void handle(String line) {
             try {
                 org.json.JSONObject o = new org.json.JSONObject(line);
+                boolean any = false;
                 org.json.JSONArray a = o.optJSONArray("px");
-                if (a == null) { Log.w(TAG, "no px in: " + line); return; }
-                int[] px = new int[a.length()];
-                for (int i = 0; i < a.length(); i++) px[i] = a.optInt(i, 0);
-                view.setRing(px);
+                if (a != null) {
+                    any = true;
+                    int[] px = new int[a.length()];
+                    for (int i = 0; i < a.length(); i++) px[i] = a.optInt(i, 0);
+                    view.setRing(px);
+                }
+                // Absent means "unchanged". A ring frame must not wipe the
+                // weather, and a weather line must not wipe the ring.
+                if (o.has("wx")) {
+                    any = true;
+                    Object wx = o.get("wx");
+                    if (wx instanceof org.json.JSONObject) {
+                        org.json.JSONObject w = (org.json.JSONObject) wx;
+                        view.setConditions(w.optInt("t"), w.optString("k", "cloud"));
+                    } else {
+                        view.setWeather(o.optString("wx", ""));
+                    }
+                }
+                if (!any) Log.w(TAG, "no px or wx in: " + line);
             } catch (Exception e) {
                 // Tolerant on purpose: a line the two sides disagree about is
                 // skipped, never fatal, or the panel goes blank on first drift.

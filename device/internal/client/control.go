@@ -109,6 +109,7 @@ type ControlClient struct {
 
 	ledCallback           LEDCallback
 	ledAnimCallback       LEDAnimCallback
+	weatherCallback       func(int, string)
 	micStartCallback      MicStartCallback
 	micStopCallback       MicStopCallback
 	disconnectedCallback  StateCallback
@@ -179,6 +180,7 @@ func NewControlClient(
 }
 
 func (c *ControlClient) OnLEDAnim(cb LEDAnimCallback)             { c.ledAnimCallback = cb }
+func (c *ControlClient) OnWeather(cb func(int, string))           { c.weatherCallback = cb }
 func (c *ControlClient) OnListen(cb ListenCallback)               { c.listenCallback = cb }
 func (c *ControlClient) OnDisconnected(cb StateCallback)          { c.disconnectedCallback = cb }
 func (c *ControlClient) OnConnected(cb StateCallback)             { c.connectedCallback = cb }
@@ -786,6 +788,17 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 				if err := json.Unmarshal(msg.LEDs, &leds); err == nil {
 					c.ledCallback(leds, msg.Listening)
 				}
+			}
+
+		case "weather":
+			// Outside conditions for the Spot's clock. A device with no
+			// panel has no callback and ignores it.
+			var msg struct {
+				Temp *int   `json:"temp"`
+				Kind string `json:"kind"`
+			}
+			if err := json.Unmarshal(raw, &msg); err == nil && c.weatherCallback != nil && msg.Temp != nil {
+				c.weatherCallback(*msg.Temp, msg.Kind)
 			}
 
 		case "led_anim":

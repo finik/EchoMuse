@@ -263,6 +263,9 @@ func main() {
 
 	// Device-rendered ring animations (led_anim) — the animation engine
 	// runs on the device's own ticker, immune to controller/WiFi jitter.
+	controlClient.OnWeather(func(temp int, kind string) {
+		s.SetWeather(temp, kind)
+	})
 	controlClient.OnLEDAnim(func(raw json.RawMessage) {
 		var spec server.AnimSpec
 		if err := json.Unmarshal(raw, &spec); err != nil {
