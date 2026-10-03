@@ -95,6 +95,7 @@ import em_oww_metadata
 import em_player
 import em_tasks
 import em_timers
+import em_house_announce
 import em_tts_audio
 import em_turn_record
 import em_turnclock
@@ -966,6 +967,22 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             if self._trace:
                 self._trace.stt_text = text
                 self._trace.t_stt_ms = self._trace.elapsed_ms()
+            # "announce" on its own starts a house announcement. HA must
+            # not answer it, and must not be given the words that follow.
+            if em_house_announce.is_announce_command(text):
+                self._house_announce = True
+                dev = getattr(self, "_turn_device", None)
+                if dev is not None:
+                    dev.house_announce = True
+                log.info(f"[{self._log_name}] House announce requested")
+            elif em_house_announce.announcement_body(text):
+                # The message was in the same sentence. Replay that recording.
+                # Do not ask again, and do not let HA treat it as a command.
+                self._house_announce = True
+                dev = getattr(self, "_turn_device", None)
+                if dev is not None:
+                    dev.house_announce_clip = True
+                log.info(f"[{self._log_name}] House announce with message")
             if self._on_stt_end and not self._turn_cancelled:
                 em_tasks.spawn(self._on_stt_end(text))
 
@@ -1321,9 +1338,11 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             log.warning(f"[{self._log_name}] No active HA connection — cannot start voice turn")
             return
 
+        self._turn_device           = device
         self._turn_active           = True
         self._turn_cancelled        = False
         self._turn_end_reason       = None
+        self._house_announce        = False
         self._tts_event.clear()
         self._tts_audio_url         = None
         self._tts_audio_data        = None
@@ -1471,6 +1490,13 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 why = self._turn_end_reason or "cancelled"
                 log.info(f"[{self._log_name}] Turn {why} while waiting for TTS")
                 if trace: trace.outcome = why
+                return
+
+            if self._house_announce:
+                # The prompt and the recording are ours. HA's reply to the
+                # bare word "announce" would talk over the question.
+                log.info(f"[{self._log_name}] House announce — suppressing HA's reply")
+                if trace: trace.outcome = "house_announce"
                 return
 
             if self._tts_audio_url:
@@ -1746,6 +1772,10 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         # buffer from an earlier turn must never be attributed to this one.
         capture     = bytearray() if getattr(device, "save_utterances", False) else None
         device.last_utterance_pcm = None
+        # Always kept, so "announce dinner is ready" can be replayed. Not written
+        # to disk. Capped so a long turn cannot grow without limit.
+        heard = bytearray()
+        device.turn_pcm = None
 
         # Preroll discard — drop wake-word tail from voice_queue before
         # streaming to HA. Wake turns pass VOICE_PREROLL_DISCARD; button and
@@ -2020,6 +2050,8 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                     # capture follows it, which stays correct by construction.
                     if capture is not None and len(capture) < em_recordings.MAX_UTTERANCE_BYTES:
                         capture.extend(payload)
+                    if len(heard) < em_house_announce.MAX_PCM:
+                        heard.extend(payload[:em_house_announce.MAX_PCM - len(heard)])
 
                     if self._trace:
                         self._trace.audio_frames += 1
@@ -2052,6 +2084,8 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             # those are exactly the turns worth listening back to.
             if capture:
                 device.last_utterance_pcm = bytes(capture)
+            if heard:
+                device.turn_pcm = bytes(heard)
 
     def disconnect(self) -> None:
         """
