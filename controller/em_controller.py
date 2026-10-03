@@ -97,6 +97,7 @@ import em_shadow
 import em_health
 import em_wake_samples
 import em_oww_warmup
+import em_house_announce
 import em_barge
 import em_arbiter
 import em_listen
@@ -541,6 +542,12 @@ class Device:
         # _persist_turn (which owns the write — it has the rowid the
         # filename is keyed on) and consumed there.
         self.last_utterance_pcm: bytes | None = None
+        # Set when the utterance was the bare command "announce". The turn
+        # loop records the next thing said and plays it on every device.
+        self.house_announce: bool = False
+        # Set when the message was in the same sentence as "announce".
+        self.house_announce_clip: bool = False
+        self.turn_pcm: bytes | None = None
         self.eq_bands:      list  = [0.0] * 8
         self.eq_loudness:   bool  = False
         self.bass_guard_enabled: bool  = True
@@ -2472,6 +2479,107 @@ def _put_voice_frame(device: Device, chunk: bytes) -> None:
             pass
 
 
+def _drain_voice(device: Device) -> int:
+    n = 0
+    while True:
+        try:
+            device.voice_queue.get_nowait()
+            n += 1
+        except asyncio.QueueEmpty:
+            return n
+
+
+async def _record_announcement(device: Device) -> bytes:
+    """Pull mic frames until the person stops talking, or the wait expires."""
+    buf = bytearray()
+    speech = False
+    last_speech = 0.0
+    started = time.monotonic()
+    while True:
+        now = time.monotonic()
+        if now - started > em_house_announce.MAX_S:
+            break
+        if not speech and now - started > em_house_announce.WAIT_S:
+            break
+        if speech and now - last_speech > em_house_announce.HUSH_S:
+            break
+        try:
+            item = await asyncio.wait_for(device.voice_queue.get(), timeout=0.3)
+        except asyncio.TimeoutError:
+            continue
+        if item is None or isinstance(item, str):
+            if speech:
+                break
+            continue
+        pcm = bytes(item)
+        buf.extend(pcm)
+        if em_house_announce.is_speech(pcm):
+            speech = True
+            last_speech = time.monotonic()
+    return bytes(buf) if speech else b""
+
+
+async def _play_announcement(pcm: bytes) -> None:
+    async def one(d: Device) -> None:
+        try:
+            await d.stream_speaker(pcm)
+        except Exception:
+            log.exception(f"[{d.device_id}] house announce playback failed")
+
+    tasks = []
+    for d in list(_devices.values()):
+        if d.data_ws is None:
+            continue
+        tasks.append(asyncio.create_task(one(d)))
+    if tasks:
+        await asyncio.gather(*tasks)
+    seconds = len(pcm) / (SPEAKER_RATE * 2) + SPEAKER_PRIME_SECONDS
+    await asyncio.sleep(seconds)
+
+
+async def _broadcast_recorded(device: Device, recorded: bytes) -> None:
+    """Play a recording that was already spoken, on every connected device."""
+    if not recorded or not em_house_announce.is_speech(recorded):
+        log.info(f"[{device.device_id}] Announcement empty — not sending")
+        return
+    playback = em_house_announce.chime() + em_house_announce.to_speaker(recorded)
+    log.info(
+        f"[{device.device_id}] Announcing {len(recorded)} bytes to the house"
+    )
+    await _play_announcement(playback)
+
+
+async def _house_announce(device: Device) -> None:
+    """Ask on this device, record the answer, play it on every device."""
+    prompt = em_house_announce.load_prompt()
+    if not prompt:
+        log.error("[announce] prompt missing — not asking")
+        return
+    log.info(f"[{device.device_id}] Asking what to announce")
+    if device.private_listening:
+        await device.mic_start_turn()
+    else:
+        await device.mic_start()
+    _drain_voice(device)
+    device.listening = True
+    await leds_listening(device)
+    await device.stream_speaker(prompt)
+    await asyncio.sleep(len(prompt) / (SPEAKER_RATE * 2) + 0.4)
+    _drain_voice(device)
+    recorded = await _record_announcement(device)
+    await device.mic_stop()
+    device.listening = False
+    await leds_off(device)
+    if not recorded:
+        log.info(f"[{device.device_id}] Announcement empty — not sending")
+        return
+    playback = em_house_announce.chime() + em_house_announce.to_speaker(recorded)
+    log.info(
+        f"[{device.device_id}] Announcing {len(recorded)} bytes to the house"
+    )
+    await _play_announcement(playback)
+
+
 async def _run_voice_locked(device: Device, trigger_label: str = "unknown",
                             is_wakeword: bool = False, session: int | None = None):
     """
@@ -2759,6 +2867,18 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown",
                         await device.mic_stop()
                     await cleanup_esphome()
                     log.info(f"[{device.device_id}] Voice turn complete (esphome mode)")
+
+                if device.house_announce:
+                    device.house_announce = False
+                    await _house_announce(device)
+                    break
+
+                if device.house_announce_clip:
+                    device.house_announce_clip = False
+                    clip = device.turn_pcm or b""
+                    device.turn_pcm = None
+                    await _broadcast_recorded(device, clip)
+                    break
 
                 if device.barge_detected and device.barge_ceded:
                     # Another Echo won the interrupting utterance, or there is
