@@ -54,7 +54,14 @@ RUNTIME_NAME = "libonnxruntime.so"
 SHARED_NAMES = ("melspectrogram.onnx", "embedding_model.onnx")
 
 # Where the vendored ARM runtime lands in the image (see Dockerfile).
-RUNTIME_DIR = "/app/models/oww_runtime"
+#
+# EM_OWW_RUNTIME_DIR overrides it, because this default is a path inside the
+# CONTAINER and a controller run from source has no /app at all — so
+# runtime_source() returns None there however the controller was built, and
+# the device's Updates tab reports the image as missing the runtime when the
+# real answer is that it looked somewhere that does not exist. Read at import,
+# so changing it needs a restart.
+RUNTIME_DIR = os.environ.get("EM_OWW_RUNTIME_DIR", "/app/models/oww_runtime")
 
 # Silero VAD for the device's turn-stream speech gate (device
 # internal/client/speechgate.go, sileroModel). Built into RUNTIME_DIR by the
@@ -233,8 +240,9 @@ def desired_assets(models: list[str],
     rt = runtime_source(runtime_dir)
     if rt is None:
         problems.append(
-            "ONNX Runtime is not vendored in this controller image — "
-            "rebuild it, or update to a release that bundles it"
+            f"ONNX Runtime not found at {Path(runtime_dir) / RUNTIME_NAME} — "
+            "a controller built from the Dockerfile vendors it there; one run "
+            "from source needs EM_OWW_RUNTIME_DIR pointing at a copy"
         )
     else:
         assets.append(Asset(RUNTIME_NAME, rt, md5_file(rt),
