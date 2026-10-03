@@ -217,6 +217,7 @@ COPY em_wifi.py .
 COPY em_timers.py .
 COPY em_loglevel.py .
 COPY em_house_announce.py .
+COPY em_weather.py .
 COPY version.py .
 # ESPHome native API subpackage (frame protocol, message registry, vendored protobuf)
 COPY esphome/ ./esphome/
