@@ -2263,6 +2263,10 @@ class DeviceESPhomeServer:
         # callable() each; None when no device is connected.
         self._ring_alarm = None
         self._stop_alarm = None
+        # Injected by device_connected() — async callable() that paints or
+        # clears the countdown arc. Same reason as the alarm: it drives the
+        # device ring, which this module cannot reach.
+        self._sync_countdown = None
         # Injected by device_connected() — async callable() that runs one
         # voice turn nobody spoke a wake word for, for HA's announce-then-
         # listen. In em_controller for _standalone_play's reason: it drives the
@@ -2314,7 +2318,11 @@ class DeviceESPhomeServer:
         HA discards a timer when it finishes, so stopping one by voice is
         decided on the controller (em_timers.DismissListen).
         """
-        transition = self._timers.apply(event_type, timer_id)
+        transition = self._timers.apply(
+            event_type, timer_id,
+            seconds_left=seconds_left,
+            total_seconds=total_seconds,
+        )
         ev_name = {
             em_timers.TIMER_STARTED:   "started",
             em_timers.TIMER_UPDATED:   "updated",
@@ -2330,6 +2338,14 @@ class DeviceESPhomeServer:
             await self._ring_alarm()
         elif transition == em_timers.RING_STOP and self._stop_alarm is not None:
             await self._stop_alarm()
+        # After the alarm hand-off, so a FINISHED does not paint the arc
+        # over the pulse that just started.
+        if self._sync_countdown is not None:
+            await self._sync_countdown()
+
+    def timer_countdown(self, now: float | None = None):
+        """Soonest running timer as (seconds_left, total), or None."""
+        return self._timers.soonest(now)
 
     async def dismiss_timer_alarm(self) -> bool:
         """
@@ -2340,6 +2356,8 @@ class DeviceESPhomeServer:
         was_ringing = self._timers.clear()
         if was_ringing and self._stop_alarm is not None:
             await self._stop_alarm()
+        if self._sync_countdown is not None:
+            await self._sync_countdown()
         return was_ringing
 
     @property
@@ -2888,6 +2906,7 @@ async def device_connected(
     start_conversation=None,
     set_wake_word=None,
     wake_word_enabled: bool = True,
+    sync_countdown=None,
 ) -> None:
     """
     Called by em_controller.handle_control() when an Echo Dot connects.
@@ -2941,6 +2960,7 @@ async def device_connected(
     server._start_conversation = start_conversation
     server._set_wake_word = set_wake_word
     server.wake_word_enabled = bool(wake_word_enabled)
+    server._sync_countdown = sync_countdown
     if server._server is not None:
         log.debug(f"[esphome.{device_id[-8:]}] device_connected: port {server.port} already listening")
         return
@@ -2971,6 +2991,7 @@ async def device_disconnected(device_id: str) -> None:
     server._stop_alarm = None
     server._start_conversation = None
     server._set_wake_word = None
+    server._sync_countdown = None
     await server.stop()
     log.info(f"[esphome.{device_id[-8:]}] ESPHome port {server.port} down (device disconnected)")
 

@@ -508,6 +508,10 @@ class Device:
         # that leads nowhere (ceded, stale, a false accept on the chime) must
         # not leave an alarm silent for the rest of its ring.
         self.timer_alarm_hold_t: float = 0.0
+        # Paints the shrinking arc while a timer is counting down. None when
+        # no timer is running. Separate from the alarm task: that one owns
+        # the ring only after the timer has finished.
+        self.timer_countdown_task: "asyncio.Task | None" = None
 
         # How many playbacks are streaming-or-draining on the speaker plane.
         # NOT the same thing as `speaking`, which clears as soon as the socket
@@ -2252,6 +2256,88 @@ async def _run_post_turn_playback(device: Device, voice_response: bytes) -> None
 # the moment it finishes and cannot cancel one that is already ringing: a
 # dot-button tap, the wake word followed by anything spoken
 # (_dismiss_by_speech), or HA cancelling a still-RUNNING timer before it fires.
+
+def _countdown_owns_ring(device: Device) -> bool:
+    """
+    True when a countdown paint will not stamp over a ring someone else owns.
+
+    A turn (listening, thinking, the spoken reply) and a finished-timer pulse
+    both paint the same 12 segments. The countdown yields for those and
+    comes back when they release the ring.
+    """
+    if device.voice_lock.locked() or device.oww_paused.is_set():
+        return False
+    if device.speaker_busy:
+        return False
+    task = device.timer_alarm_task
+    if task is not None and not task.done():
+        return False
+    return True
+
+
+async def _paint_timer_countdown(device: Device) -> None:
+    """
+    Repaint the shrinking arc once a second until cancelled.
+
+    HA sends the remaining time once, at start and on update. The ring has
+    to move on its own after that. One second is the resolution HA gave us,
+    and a 12-segment arc does not need finer.
+    """
+    try:
+        while True:
+            server = esphome.get_server(device.device_id)
+            snap = server.timer_countdown() if server is not None else None
+            if (
+                server is None
+                or server.timer_ringing
+                or snap is None
+            ):
+                return
+            if _countdown_owns_ring(device):
+                remaining, total = snap
+                await device.set_leds(
+                    em_timers.countdown_leds(remaining, total, NUM_LEDS)
+                )
+            await asyncio.sleep(1.0)
+    except asyncio.CancelledError:
+        raise
+    finally:
+        if device.timer_countdown_task is asyncio.current_task():
+            device.timer_countdown_task = None
+
+
+async def sync_timer_countdown(device: Device) -> None:
+    """
+    Start, keep, or stop the countdown arc to match the timer registry.
+
+    Called after every HA timer event. Does not clear the ring unless this
+    task was the one painting it — a cancel during a turn must not darken
+    the listening ring, and a finish must not darken the alarm pulse.
+    """
+    server = esphome.get_server(device.device_id)
+    show = (
+        server is not None
+        and not server.timer_ringing
+        and server.timer_countdown() is not None
+    )
+    task = device.timer_countdown_task
+    if show:
+        if task is None or task.done():
+            device.timer_countdown_task = asyncio.create_task(
+                _paint_timer_countdown(device)
+            )
+        return
+    was_painting = task is not None and not task.done()
+    device.timer_countdown_task = None
+    if was_painting:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+    if was_painting and _countdown_owns_ring(device):
+        await leds_off(device)
+
 
 async def start_timer_alarm(device: Device) -> None:
     if device.timer_alarm_task is not None and not device.timer_alarm_task.done():
@@ -5657,6 +5743,8 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
             await start_timer_alarm(_d)
         async def _stop_alarm(_d=_device_ref) -> None:
             await stop_timer_alarm(_d)
+        async def _sync_countdown(_d=_device_ref) -> None:
+            await sync_timer_countdown(_d)
         async def _start_conversation(_d=_device_ref) -> None:
             # HA has finished asking; the answer is whatever is said next.
             # Same shape as the button turn — a deliberate act with no wake
@@ -5757,6 +5845,7 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
             start_conversation=_start_conversation,
             set_wake_word=_set_wake_word,
             wake_word_enabled=device.wake_word_enabled,
+            sync_countdown=_sync_countdown,
         )
         # #776: firmware that can honour the stored choice again (an upgrade)
         # may meet a Home Assistant still showing the temporary "on". Without
@@ -5877,6 +5966,9 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
             if device.timer_alarm_task is not None:
                 device.timer_alarm_task.cancel()
                 device.timer_alarm_task = None
+            if device.timer_countdown_task is not None:
+                device.timer_countdown_task.cancel()
+                device.timer_countdown_task = None
             if em_state.devices.get(device.device_id) is not device:
                 # A replacement connection has already registered for this
                 # device_id — this socket is stale. Tearing down shared
