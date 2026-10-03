@@ -16,6 +16,7 @@ import (
 	"github.com/wilbowes/EchoMuse/internal/config"
 	"github.com/wilbowes/EchoMuse/internal/listen"
 	"github.com/wilbowes/EchoMuse/internal/processor"
+	"github.com/wilbowes/EchoMuse/internal/profile"
 	"github.com/wilbowes/EchoMuse/internal/wakeword/ort"
 	"github.com/wilbowes/EchoMuse/internal/wakeword/shadow"
 	"github.com/wilbowes/EchoMuse/pkg/mic"
@@ -357,10 +358,10 @@ func (d *DataClient) SetAecRefSource(v string) {
 // noteEchoRef feeds one period of the candidate reference channel to the
 // detector and reports whether the hardware path should be used for it.
 //
-// Confirmation is one-way. Once ch8 has been seen both bit-exact silent and
-// carrying audio, it is a reference and stays one: the alternative is a
-// device that flips sources mid-stream every time the room goes quiet, which
-// throws away a converged filter for nothing.
+// Confirmation is one-way. Once the profile's reference channel has been
+// seen both bit-exact silent and carrying audio, it is a reference and stays
+// one: the alternative is a device that flips sources mid-stream every time
+// the room goes quiet, which throws away a converged filter for nothing.
 func (d *DataClient) noteEchoRef(ref []byte) bool {
 	switch d.hwRefMode.Load() {
 	case hwRefForceSW:
@@ -400,9 +401,13 @@ func (d *DataClient) noteEchoRef(ref []byte) bool {
 	if d.hwRefSeenSilent && d.hwRefSeenAudio {
 		d.hwRefOn = true
 		d.aec.SetHardwareRef(true)
-		log.Printf("[aec] ch8 confirmed as the playback loopback " +
-			"(bit-exact silent when idle, audio when playing) — " +
-			"using the frame-aligned hardware reference")
+		ch := -1
+		if refs := profile.Active().Mic.RefChannels; len(refs) > 0 {
+			ch = refs[0]
+		}
+		log.Printf("[aec] ch%d confirmed as the playback loopback "+
+			"(bit-exact silent when idle, audio when playing) — "+
+			"using the frame-aligned hardware reference", ch)
 		return true
 	}
 	return false

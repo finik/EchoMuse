@@ -57,8 +57,8 @@ func TestRookGeometry(t *testing.T) {
 	if m.WakeChannel != 2 {
 		t.Errorf("wake channel = %d, want 2 (measured, not geometric)", m.WakeChannel)
 	}
-	if len(m.RefChannels) != 0 {
-		t.Errorf("ref channels = %v, want none — ch4/ch5 are digital zero", m.RefChannels)
+	if len(m.RefChannels) != 1 || m.RefChannels[0] != 5 {
+		t.Errorf("ref channels = %v, want [5] — right side is the one the speaker plays", m.RefChannels)
 	}
 }
 
@@ -162,5 +162,17 @@ func TestMuteLEDIsPerBoard(t *testing.T) {
 	}
 	if rook.Buttons.HasMuteLED {
 		t.Error("rook has no mute-button LED; attempting it logs a fault every boot")
+	}
+}
+
+// The BLE proxy opens /dev/stpbt. That node is the Dot's MediaTek radio.
+// The Spot's Broadcom radio has no such device; enabling the proxy there
+// fails at open and must not be attempted.
+func TestBLEProxyFollowsTheRadio(t *testing.T) {
+	if !biscuit.HasBLEProxy {
+		t.Error("biscuit exposes /dev/stpbt; the proxy is how that radio is used")
+	}
+	if rook.HasBLEProxy {
+		t.Error("rook has no /dev/stpbt; the proxy must stay off")
 	}
 }

@@ -134,6 +134,13 @@ type Profile struct {
 	Mic     Mic
 	Array   Array
 	Buttons Buttons
+
+	// HasBLEProxy is true where the combo radio exposes /dev/stpbt, the raw
+	// HCI node the BLE proxy opens. biscuit's MediaTek chip does. rook's
+	// Broadcom BCM43569 does not — Bluetooth there is H4 over UART, and
+	// opening /dev/stpbt fails. Same rule as Buttons.HasMuteLED: a board
+	// without the hardware must not attempt it and log a fault.
+	HasBLEProxy bool
 }
 
 // biscuit — Echo Dot gen 2. The values these replaced were constants in
@@ -172,6 +179,7 @@ var biscuit = &Profile{
 		VolumePath: "/dev/input/event2",
 		HasMuteLED: true,
 	},
+	HasBLEProxy: true,
 }
 
 // rook — Echo Spot 1st gen (2017). Measured on hardware; see
@@ -179,9 +187,18 @@ var biscuit = &Profile{
 //
 // The capture codec is a TLV320AIC3101 with two ADCs taking four mics
 // differentially, and the driver reports a FIXED six channels
-// (`tinypcminfo -D 0 -d 24`: channels min=max=6). Four mics on ch0-3; ch4 and
-// ch5 are exact digital zero, not a loopback, so there is no hardware AEC
-// reference and no centre mic.
+// (`tinypcminfo -D 0 -d 24`: channels min=max=6). Four mics on ch0-3. There
+// is no centre mic.
+//
+// ch4 and ch5 are a stereo playback loopback, not idle channels. Exact
+// digital zero in silence is what a loopback looks like when nothing is
+// playing; that was misread as "no reference" until a tone was played
+// (2026-10-02, this unit). A 0.1 FS 1 kHz tone came back on the playing
+// side at -23.0 dBFS RMS, which is the tone itself, while the mics sat
+// near -46 dBFS. Left-only playback appears only on ch4 and is inaudible.
+// Right-only playback appears only on ch5 and is what the mics hear. The
+// speaker is the right channel, so the usable reference is ch5 — the same
+// "driver emits both, only the right reaches the speaker" split as biscuit.
 //
 // WakeChannel is ch2 by MEASUREMENT, not geometry. The four capsules sit within
 // 0.5dB of each other in level and SNR, so loudness says nothing about which
@@ -230,7 +247,7 @@ var rook = &Profile{
 		PeriodSize:  512,
 		Periods:     5,
 		MicChannels: []int{0, 1, 2, 3},
-		RefChannels: nil,
+		RefChannels: []int{5},
 		ADCs:        []string{"A", "B"},
 		WakeChannel: 2,
 	},
@@ -249,6 +266,8 @@ var rook = &Profile{
 		MuteKeyCode: 116, // KEY_POWER
 		Grab:        true,
 	},
+	// No /dev/stpbt. See HasBLEProxy.
+	HasBLEProxy: false,
 }
 
 var profiles = map[string]*Profile{

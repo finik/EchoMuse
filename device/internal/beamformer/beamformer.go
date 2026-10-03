@@ -491,9 +491,9 @@ func (b *Beamformer) extractChannel(raw []byte, ch int, gain float64) []byte {
 // reference this period" and fall back rather than cancelling against
 // silence.
 func (b *Beamformer) EchoRef(raw []byte) []byte {
-	// b.echoRefCh < 0 means this board has no playback loopback in its capture
-	// stream (rook). Returning nil is the existing "no hardware reference"
-	// signal, so the AEC falls back to the software speaker tap.
+	// b.echoRefCh < 0 means this board lists no playback loopback. Returning
+	// nil is the existing "no hardware reference" signal, so the AEC falls
+	// back to the software speaker tap. rook's loopback is ch5, in range.
 	if b.echoRefCh < 0 || len(raw) < b.frameSize {
 		return nil
 	}

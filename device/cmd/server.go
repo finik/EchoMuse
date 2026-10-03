@@ -1457,7 +1457,15 @@ func syncListenState(dc *client.DataClient, cc *client.ControlClient, force bool
 
 func applyBleConfig(scanner *bluetooth.Scanner) {
 	snap := config.Get().Snapshot()
-	scanner.SetEnabled(snap.BleProxyEnabled != nil && *snap.BleProxyEnabled)
+	want := snap.BleProxyEnabled != nil && *snap.BleProxyEnabled
+	// The controller toggle is fleet-wide in shape. On a board with no
+	// /dev/stpbt the open fails, so the request is dropped here rather than
+	// discovered as a transport error after the scanner has started.
+	if want && !profile.Active().HasBLEProxy {
+		log.Printf("[ble] proxy requested but this board has no /dev/stpbt — left off")
+		want = false
+	}
+	scanner.SetEnabled(want)
 }
 
 func allLEDs(r, g, b uint8) []led.Led {

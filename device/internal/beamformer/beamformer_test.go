@@ -135,7 +135,7 @@ func TestGeometryComesFromTheProfile(t *testing.T) {
 		wakeCh, echoRef      int
 	}{
 		{"biscuit", 9, 27, 6, 6, 8},
-		{"rook", 6, 18, 4, 2, -1},
+		{"rook", 6, 18, 4, 2, 5},
 	} {
 		t.Run(tc.board, func(t *testing.T) {
 			b := NewFor(profile.ByName(tc.board))
@@ -241,13 +241,23 @@ func TestEchoRefRejectsShortBuffer(t *testing.T) {
 	}
 }
 
-// A board with no loopback must report no reference rather than reading a
-// channel that does not exist — on rook that index would be past the frame.
-func TestEchoRefAbsentOnBoardWithoutLoopback(t *testing.T) {
+// rook's usable loopback is ch5, inside the 6-channel frame. EchoRef must
+// return that channel and not a microphone.
+func TestRookEchoRefIsTheRightLoopback(t *testing.T) {
 	b := NewFor(profile.ByName("rook"))
-	raw := rawPeriod(b, periodFrames, func(ch int) int32 { return int32(ch) << 12 })
-	if out := b.EchoRef(raw); out != nil {
-		t.Fatalf("board has no reference channel; EchoRef returned %d bytes", len(out))
+	raw := rawPeriod(b, periodFrames, func(ch int) int32 {
+		if ch == 5 {
+			return 0x100000
+		}
+		return 0
+	})
+	out := b.EchoRef(raw)
+	if out == nil {
+		t.Fatal("rook lists ch5 as the reference; EchoRef returned nil")
+	}
+	got := int16(uint16(out[0]) | uint16(out[1])<<8)
+	if got == 0 {
+		t.Fatal("EchoRef extracted silence; it did not read ch5")
 	}
 }
 
