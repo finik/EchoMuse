@@ -5,9 +5,10 @@ em_timers.py — voice-assistant timer state and alarm audio (pure logic)
 Home Assistant owns the timer: "set a timer for one minute" is resolved by
 HA's Assist intent, HA counts it down, and HA pushes state to the satellite
 as VoiceAssistantTimerEventResponse events (STARTED / UPDATED / CANCELLED /
-FINISHED — see esphome/vendor/api_pb2.py). The satellite's only job is to
-advertise the TIMERS feature so those intents route to it, track which timers
-are live, and RING when one finishes.
+FINISHED — see esphome/vendor/api_pb2.py). The satellite's job is to advertise
+the TIMERS feature so those intents route to it, track which timers are live,
+show the one that ends soonest as a shrinking arc on the ring, and RING when
+one finishes.
 
 This module is the pure half of that, kept out of em_esphome for the same
 reason as em_button / em_shadow / em_turnclock — the controller test suite
@@ -32,6 +33,7 @@ cleared and the ring stops; a safety cap bounds a ring nobody ever answers.
 from __future__ import annotations
 
 import os
+import time
 
 import numpy as np
 
@@ -94,6 +96,55 @@ TIMER_ANIM = {
     "ttlSec":   5,
 }
 
+# Countdown arc while a timer is still running. Blue, not a status colour:
+# red is mute, orange is a missing link, amber is the finished-timer pulse,
+# green is the listening ring. Dim on purpose — the Spot is a bedside clock.
+COUNTDOWN_COLOR = (24, 96, 180)
+
+
+class _Live:
+    """One HA timer. deadline is monotonic seconds; only used while running."""
+
+    def __init__(self, state: str, total: int = 0, deadline: float = 0.0) -> None:
+        self.state = state
+        self.total = total
+        self.deadline = deadline
+
+
+def countdown_leds(remaining: float, total: float, n: int = 12) -> list:
+    """
+    A shrinking arc: lit from the top, clockwise, in proportion to time left.
+
+    The last segment stays dimly lit until remaining hits zero, so a timer
+    that is nearly done does not look like no timer. Zero remaining is off —
+    the finished-timer pulse owns the ring from there.
+    """
+    r, g, b = COUNTDOWN_COLOR
+    off = [{"id": i, "r": 0, "g": 0, "b": 0} for i in range(n)]
+    if n <= 0 or total <= 0 or remaining <= 0:
+        return off
+    frac = min(1.0, remaining / total)
+    lit = frac * n
+    full = int(lit)
+    partial = lit - full
+    if full == 0 and partial < 0.18:
+        partial = 0.18
+    leds = []
+    for i in range(n):
+        if i < full:
+            scale = 1.0
+        elif i == full and partial > 0:
+            scale = partial
+        else:
+            scale = 0.0
+        leds.append({
+            "id": i,
+            "r": int(r * scale),
+            "g": int(g * scale),
+            "b": int(b * scale),
+        })
+    return leds
+
 
 class TimerRegistry:
     """
@@ -106,40 +157,82 @@ class TimerRegistry:
     """
 
     def __init__(self) -> None:
-        # timer_id -> "running" | "finished"
-        self._timers: dict[str, str] = {}
+        # timer_id -> _Live
+        self._timers: dict[str, _Live] = {}
 
     @property
     def ringing(self) -> bool:
-        return any(state == "finished" for state in self._timers.values())
+        return any(t.state == "finished" for t in self._timers.values())
 
-    def apply(self, event_type: int, timer_id: str = "") -> str:
+    def apply(
+        self,
+        event_type: int,
+        timer_id: str = "",
+        seconds_left: int = 0,
+        total_seconds: int = 0,
+        now: float | None = None,
+    ) -> str:
         """
         Fold one event into the registry.
 
         Returns RING_START when this event begins a ring (first finished timer
         after a quiet registry), RING_STOP when it ends one (the last finished
         timer was dismissed/cancelled), or RING_NONE otherwise.
+
+        seconds_left / total_seconds are what HA sends on STARTED and UPDATED.
+        The registry counts down from them itself — HA does not push a tick.
+        `now` is monotonic seconds, injectable so tests do not sleep.
         """
         was = self.ringing
+        if now is None:
+            now = time.monotonic()
 
         if event_type == TIMER_FINISHED:
-            self._timers[timer_id] = "finished"
+            self._timers[timer_id] = _Live("finished")
         elif event_type == TIMER_CANCELLED:
             # A CANCELLED for a still-running timer must NOT affect the ring,
             # and a CANCELLED for a finished one is exactly how a spoken "stop"
             # dismisses it — pop covers both.
             self._timers.pop(timer_id, None)
         elif event_type in (TIMER_STARTED, TIMER_UPDATED):
-            self._timers[timer_id] = "running"
+            total = int(total_seconds or 0)
+            left = int(seconds_left or 0)
+            if left <= 0 and total > 0:
+                left = total
+            if total <= 0:
+                total = left
+            self._timers[timer_id] = _Live("running", total, now + max(0, left))
         # Unknown event types are ignored (degrade to old behaviour).
 
-        now = self.ringing
-        if now and not was:
+        ringing = self.ringing
+        if ringing and not was:
             return RING_START
-        if was and not now:
+        if was and not ringing:
             return RING_STOP
         return RING_NONE
+
+    def soonest(self, now: float | None = None) -> tuple[float, float] | None:
+        """
+        The running timer that ends first, as (seconds_left, total_seconds).
+
+        None when nothing is counting down, or HA did not say how long.
+        A deadline that has passed stays as a sliver until FINISHED arrives,
+        so the arc does not vanish in the gap before the chime.
+        """
+        if now is None:
+            now = time.monotonic()
+        best: _Live | None = None
+        for timer in self._timers.values():
+            if timer.state != "running" or timer.total <= 0:
+                continue
+            if best is None or timer.deadline < best.deadline:
+                best = timer
+        if best is None:
+            return None
+        left = best.deadline - now
+        if left <= 0:
+            left = 0.05
+        return (left, float(best.total))
 
     def clear(self) -> bool:
         """

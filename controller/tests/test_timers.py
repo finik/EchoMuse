@@ -81,6 +81,55 @@ def test_clear_reports_whether_it_was_ringing():
     assert reg.active_count() == 0
 
 
+def test_soonest_is_the_timer_that_ends_first():
+    reg = t.TimerRegistry()
+    reg.apply(t.TIMER_STARTED, "long", seconds_left=600, total_seconds=600, now=1000)
+    reg.apply(t.TIMER_STARTED, "short", seconds_left=30, total_seconds=30, now=1000)
+    assert reg.soonest(now=1010) == (20, 30)
+
+
+def test_updated_resets_the_deadline():
+    reg = t.TimerRegistry()
+    reg.apply(t.TIMER_STARTED, "a", seconds_left=60, total_seconds=60, now=0)
+    reg.apply(t.TIMER_UPDATED, "a", seconds_left=120, total_seconds=120, now=10)
+    assert reg.soonest(now=10) == (120, 120)
+
+
+def test_finished_is_not_a_countdown():
+    reg = t.TimerRegistry()
+    reg.apply(t.TIMER_STARTED, "a", seconds_left=10, total_seconds=10, now=0)
+    reg.apply(t.TIMER_FINISHED, "a")
+    assert reg.soonest(now=1) is None
+    assert reg.ringing is True
+
+
+def test_cancel_removes_the_countdown():
+    reg = t.TimerRegistry()
+    reg.apply(t.TIMER_STARTED, "a", seconds_left=10, total_seconds=10, now=0)
+    reg.apply(t.TIMER_CANCELLED, "a")
+    assert reg.soonest(now=1) is None
+
+
+def test_past_deadline_stays_a_sliver_until_finished():
+    # HA's FINISHED can land a moment after the deadline. The arc must not
+    # go dark in that gap and then pulse — that reads as two events.
+    reg = t.TimerRegistry()
+    reg.apply(t.TIMER_STARTED, "a", seconds_left=5, total_seconds=5, now=0)
+    assert reg.soonest(now=9) == (0.05, 5)
+
+
+def test_countdown_arc_shrinks_from_the_top():
+    full = t.countdown_leds(60, 60, 12)
+    assert all(led["b"] == t.COUNTDOWN_COLOR[2] for led in full)
+    half = t.countdown_leds(30, 60, 12)
+    assert [led["b"] > 0 for led in half] == [True] * 6 + [False] * 6
+    # Nearly done still shows one dim segment, not a dark ring.
+    last = t.countdown_leds(1, 3600, 12)
+    assert last[0]["b"] > 0
+    assert all(led["b"] == 0 for led in last[1:])
+    assert all(led["b"] == 0 for led in t.countdown_leds(0, 60, 12))
+
+
 # ── Spoken dismissal ─────────────────────────────────────────────────────────
 # HA discards a timer when it finishes, so a spoken "stop" over a ringing alarm
 # reaches HA and is answered "there are no timers" — no CANCELLED is ever sent
