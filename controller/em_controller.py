@@ -63,6 +63,7 @@ import json
 import logging
 import os
 import socket
+import urllib.request
 import struct
 import time
 
@@ -98,6 +99,7 @@ import em_health
 import em_wake_samples
 import em_oww_warmup
 import em_house_announce
+import em_weather
 import em_barge
 import em_arbiter
 import em_listen
@@ -4773,6 +4775,7 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                 await device.send_control({"type": "ping", "id": seq})
 
         ping_task = asyncio.create_task(ping_loop())
+        await _push_weather(device)
         oww_task  = _supervise_wake_listener(device)
         device.oww_task = oww_task
 
@@ -5848,6 +5851,65 @@ async def event_loop_lag_monitor(interval: float = 1.0,
             )
 
 
+def _http_json(url: str) -> dict:
+    req = urllib.request.Request(url, headers={"User-Agent": "echomuse"})
+    with urllib.request.urlopen(req, timeout=8) as resp:
+        return json.loads(resp.read().decode())
+
+
+# (celsius, picture name). None until the first successful lookup.
+_weather: "tuple[int, str] | None" = None
+
+
+async def _refresh_weather() -> "tuple[int, str] | None":
+    """
+    One outside reading, in Celsius. The place is this network's public
+    address unless ECHOMUSE_WEATHER_LAT and ECHOMUSE_WEATHER_LON are set.
+    A failed lookup keeps the previous reading, so a blip does not blank
+    the clock.
+    """
+    global _weather
+    lat = os.environ.get("ECHOMUSE_WEATHER_LAT")
+    lon = os.environ.get("ECHOMUSE_WEATHER_LON")
+    try:
+        if not lat or not lon:
+            place = em_weather.from_ipwho(await asyncio.to_thread(
+                _http_json, "https://ipwho.is/"))
+            if place is None:
+                return _weather
+            lat, lon, _cc = place
+        url = (
+            "https://api.open-meteo.com/v1/forecast"
+            f"?latitude={lat}&longitude={lon}"
+            "&current=temperature_2m,weather_code"
+            "&temperature_unit=celsius"
+        )
+        reading = em_weather.from_forecast(await asyncio.to_thread(_http_json, url))
+        if reading is None:
+            return _weather
+        _weather = (int(round(reading[0])), em_weather.kind(reading[1]))
+        log.info(f"Weather: {_weather[0]}\u00b0C {_weather[1]}")
+    except Exception as e:
+        log.warning(f"Weather lookup failed: {e}")
+    return _weather
+
+
+async def _push_weather(device: Device) -> None:
+    if _weather is None or device.control_ws is None:
+        return
+    temp, kind = _weather
+    await device.send_control({"type": "weather", "temp": temp, "kind": kind})
+
+
+async def weather_loop() -> None:
+    while True:
+        reading = await _refresh_weather()
+        if reading:
+            for device in list(_devices.values()):
+                await _push_weather(device)
+        await asyncio.sleep(20 * 60)
+
+
 async def main():
     log.info(f"EchoMuse Controller {api.CONTROLLER_VERSION}")
     db.init(DB_PATH)
@@ -5866,6 +5928,7 @@ async def main():
     release_task       = asyncio.create_task(api.release_poll_loop())
     session_prune_task = asyncio.create_task(api.session_prune_loop())
     loop_lag_task      = asyncio.create_task(event_loop_lag_monitor())
+    weather_task       = asyncio.create_task(weather_loop())
 
     # Device-link TLS: generate/load the CA + server cert. Failure to set
     # up TLS (missing cryptography package, unwritable dir) must never take
@@ -5931,6 +5994,7 @@ async def main():
         release_task.cancel()
         session_prune_task.cancel()
         loop_lag_task.cancel()
+        weather_task.cancel()
         mdns_task.cancel()
         await azc.async_unregister_service(info)
         await azc.async_close()
