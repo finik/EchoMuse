@@ -30,7 +30,8 @@ import numpy as np
 
 
 # Default channel count. Board-dependent: biscuit's array is 9 (6 perimeter mics,
-# a centre mic, and a stereo playback loopback), rook's is 6 (4 mics, 2 idle).
+# a centre mic, and a stereo playback loopback), rook's is 6 (4 mics, ch4/ch5
+# stereo loopback; only ch5 reaches the speaker).
 # Override with --channels; a mismatch is silent, because the wrong stride still
 # decodes to plausible-looking samples.
 N_CHANNELS = 9

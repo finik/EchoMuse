@@ -28,9 +28,10 @@ unchanged, and none of crown's launcher-APK machinery is needed.
 | Root | Magisk 17.3 + `service.d` | same |
 | Playback codec | TLV320AIC32x4 | TLV320AIC32x4 |
 | **Capture codec** | AIC32x4, 4 ADCs (A–D) | **AIC3101, 2 ADCs (A/B), 4 mics differential** |
-| **Mic channels** | **9** — 6 perimeter, centre mic ch6, stereo loopback ch7/8 | **6** — 4 mics on ch0–3, ch4/5 idle |
+| **Mic channels** | **9** — 6 perimeter, centre mic ch6, stereo loopback ch7/8 | **6** — 4 mics on ch0–3, stereo loopback ch4/ch5 |
 | **Omni centre mic** | ch6 | **none** |
-| **Hardware echo ref** | ch7/ch8 loopback | **none** |
+| **Hardware echo ref** | ch8 (right; ch7 is the unused left) | **ch5** (right; ch4 is the unused left) |
+| **Bluetooth** | MediaTek combo, `/dev/stpbt` | **Broadcom BCM43569** — Wi-Fi USB `bcmdhd`, BT H4 over UART. No `/dev/stpbt` |
 | **Ring** | 12-LED i2c ring | **none — 480×480 round LCD** |
 | Mute LED | sysfs gpio444 | none |
 | Touchscreen | none | GT5668 |
@@ -42,8 +43,13 @@ The consequences that drive the code:
   stride lands the frame boundary mid-sample. Nothing reports it as a channel
   mismatch.
 - **No centre mic**, so the always-on wake stream needs a substitute. See §4.
-- **No hardware echo reference.** `echoRefCh` is disabled rather than pointed at
-  a channel that does not exist. ch4/ch5 are exact digital zero, not a loopback.
+- **Hardware echo reference is ch5.** ch4/ch5 read exact digital zero when
+  nothing is playing, which is what a loopback does in silence — not evidence
+  that they are idle. Measured 2026-10-02 on this unit: a 0.1 FS 1 kHz tone
+  on the right channel came back on ch5 at −23.0 dBFS RMS (the tone itself)
+  and on the mics near −46 dBFS. The same tone on the left came back only on
+  ch4 and was not audible. The profile therefore lists `RefChannels: [5]`,
+  the same "only the right side reaches the speaker" split as biscuit.
 - **No LED ring**, so ring frames are rendered on the LCD by a panel app
   (`rook_panel/`) behind the existing `led.Controller` interface.
 - **Same codec family, different control offsets.** The names match; the
@@ -75,8 +81,9 @@ The consequences that drive the code:
 |---|---|
 | Mic PCM | card 0, device 24 — **6ch fixed** (min=max=6), 16kHz, `S24_3LE`, period 257–2570, periods 1–10 |
 | Speaker PCM | card 0, device 23 |
-| Mic channels | ch0–ch3 are the capsules; ch4/ch5 are exact digital zero |
+| Mic channels | ch0–ch3 capsules; ch4 left loopback (speaker does not play it); ch5 right loopback, the AEC reference |
 | Headphone jack | present, `CONFIG_MTK_AMZN_ACCDET=y` (same path as biscuit) |
+| Bluetooth | Broadcom BCM43569A2. `/dev/ttyMT1` (204,210, `bluetooth:radio`). No `/dev/stpbt`, so the BLE proxy must stay off — it hardcodes that path and fails at open on this board |
 
 Measured mixer indices. **Resolve these by name at runtime** — they are recorded
 here for reference, not for hardcoding:
