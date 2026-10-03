@@ -27,15 +27,40 @@
 # 110/127" and playback reports no underruns into silence. Magisk runs service.d
 # once per boot, so this guard is for hand restarts.
 LOCK=/data/local/tmp/start_server_rook.lock
+# The lock must name the process as well as its pid, because /data/local/tmp
+# SURVIVES A REBOOT — this board has no real /tmp, which is why the lock lives
+# here at all. The trap below clears it on every ordinary exit, but a power cut
+# is not an exit, so the file outlives the boot holding a pid from the previous
+# one. Android then hands that same low pid to one of the hundreds of processes
+# it starts before service.d runs, `[ -d /proc/$OLD ]` says "alive", and this
+# script exits believing the daemon is already up. The daemon never starts: the
+# screen shows no ring, the mic streams nothing, and the device answers nothing
+# until somebody deletes a file. Seen on the Bedroom Spot 2026-10-03, on two
+# consecutive power cycles, 50 minutes apart.
+#
+# So the check is the pid AND what it is running. A stale pid now reads as
+# stale, which is what the original comment assumed a reboot would guarantee.
+#
+# grep reads /proc/<pid>/cmdline directly, NUL separators and all, because this
+# board's shell has no `tr` — nor `tail`, `head` or `md5sum`. Anything written
+# for it has to be checked on it; the obvious `tr '\0' ' ' | grep` version
+# silently reports every lock as stale here, which removes the protection
+# above rather than fixing it.
 if [ -f "$LOCK" ]; then
     OLD=$(cat "$LOCK" 2>/dev/null)
-    if [ -n "$OLD" ] && [ -d "/proc/$OLD" ]; then
+    if [ -n "$OLD" ] && [ -r "/proc/$OLD/cmdline" ] &&
+       grep -q start_server_rook "/proc/$OLD/cmdline" 2>/dev/null; then
         echo "[start_server_rook] already running as pid $OLD — exiting" >> /data/local/tmp/server.log
         exit 0
+    fi
+    if [ -n "$OLD" ]; then
+        echo "[start_server_rook] stale lock from pid $OLD (not ours) — taking it" >> /data/local/tmp/server.log
     fi
 fi
 echo $$ > "$LOCK"
 # Drop the lock on any exit path, so a crash does not wedge the next start.
+# A power cut still leaves it behind; the cmdline check above is what makes
+# that harmless.
 trap 'rm -f "$LOCK"' EXIT INT TERM
 
 LOG=/data/local/tmp/server.log
@@ -207,6 +232,13 @@ SERVER=/data/local/bin/server
 # which looks like a silent disappearance: no panic, the log just ends. Applied
 # to the supervising shell too, so killing the child cannot orphan the loop.
 echo -1000 > /proc/$$/oom_score_adj 2>/dev/null
+
+# Night dim. Magisk runs service.d one script at a time and waits, and this
+# script never exits, so a dimmer installed beside it never gets a turn.
+BL=/sbin/.core/img/.core/service.d/03-rook-backlight.sh
+if [ -x "$BL" ]; then
+    "$BL" >/dev/null 2>&1 &
+fi
 
 attempts=0
 while [ $attempts -lt $MAX_ATTEMPTS ]; do
