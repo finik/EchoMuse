@@ -530,20 +530,6 @@ func suppressPaint(volumeActive, muted, linkDown bool) bool {
 	return muted && !linkDown
 }
 
-// SetWeather forwards an outside-conditions line to the display, if this
-// board has one. A Dot's ring controller does not implement it, and that is
-// the whole of the "no screen" case — the message is ignored.
-func (s *Server) SetWeather(temp int, kind string) {
-	s.ledMu.Lock()
-	lc := s.ledController
-	s.ledMu.Unlock()
-	p, ok := lc.(interface{ SetWeather(int, string) error })
-	if !ok {
-		return
-	}
-	_ = p.SetWeather(temp, kind)
-}
-
 // paintBaseLEDs paints the ring from the stored controller state.
 func (s *Server) paintBaseLEDs() {
 	s.ledMu.Lock()

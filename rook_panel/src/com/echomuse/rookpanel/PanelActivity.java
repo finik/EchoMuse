@@ -20,6 +20,8 @@ import android.view.WindowManager;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.Date;
@@ -82,6 +84,7 @@ public class PanelActivity extends Activity {
         });
         setContentView(view);
         new Thread(new StateServer(view), "state-server").start();
+        new Thread(new WeatherPoll(view), "weather").start();
     }
 
     /**
@@ -438,23 +441,106 @@ public class PanelActivity extends Activity {
                     for (int i = 0; i < a.length(); i++) px[i] = a.optInt(i, 0);
                     view.setRing(px);
                 }
-                // Absent means "unchanged". A ring frame must not wipe the
-                // weather, and a weather line must not wipe the ring.
-                if (o.has("wx")) {
-                    any = true;
-                    Object wx = o.get("wx");
-                    if (wx instanceof org.json.JSONObject) {
-                        org.json.JSONObject w = (org.json.JSONObject) wx;
-                        view.setConditions(w.optInt("t"), w.optString("k", "cloud"));
-                    } else {
-                        view.setWeather(o.optString("wx", ""));
-                    }
-                }
-                if (!any) Log.w(TAG, "no px or wx in: " + line);
+                if (!any) Log.w(TAG, "no px in: " + line);
             } catch (Exception e) {
                 // Tolerant on purpose: a line the two sides disagree about is
                 // skipped, never fatal, or the panel goes blank on first drift.
                 Log.w(TAG, "bad line: " + line + " (" + e + ")");
+            }
+        }
+    }
+
+    /**
+     * Outside conditions, fetched by this app.
+     *
+     * The panel owns the display and serves itself: the EchoMuse daemon's
+     * socket carries ring frames and nothing else, because that socket exists
+     * to emulate the Dot's 12-LED ring on a device that has a screen instead.
+     * A clock decoration has no business crossing it.
+     *
+     * Open-Meteo and ipwho.is both need no key and no account. A failed
+     * lookup keeps the last reading, so a blip leaves the clock alone rather
+     * than blanking it, and the first failure is the only one logged per hour
+     * — this runs forever on a device whose kernel log is the only crash
+     * channel it has.
+     */
+    private static final class WeatherPoll implements Runnable {
+        private static final long PERIOD_MS = 20 * 60 * 1000L;
+        private final PanelView view;
+
+        WeatherPoll(PanelView view) { this.view = view; }
+
+        @Override public void run() {
+            boolean quiet = false;
+            while (true) {
+                try {
+                    double[] at = place();
+                    if (at != null) current(at[0], at[1]);
+                    quiet = false;
+                } catch (Exception e) {
+                    if (!quiet) Log.w(TAG, "weather: " + e);
+                    quiet = true;
+                }
+                try { Thread.sleep(PERIOD_MS); } catch (InterruptedException e) { return; }
+            }
+        }
+
+        /** This network's own location, or null. */
+        private double[] place() throws Exception {
+            org.json.JSONObject o = get("https://ipwho.is/");
+            if (!o.optBoolean("success", false)) return null;
+            if (!o.has("latitude") || !o.has("longitude")) return null;
+            return new double[] { o.getDouble("latitude"), o.getDouble("longitude") };
+        }
+
+        private void current(double lat, double lon) throws Exception {
+            org.json.JSONObject o = get(
+                "https://api.open-meteo.com/v1/forecast?latitude=" + lat
+                + "&longitude=" + lon
+                + "&current=temperature_2m,weather_code&temperature_unit=celsius");
+            org.json.JSONObject cur = o.optJSONObject("current");
+            if (cur == null || !cur.has("temperature_2m")) return;
+            int temp = (int) Math.round(cur.getDouble("temperature_2m"));
+            view.setConditions(temp, kind(cur.optInt("weather_code", 3)));
+        }
+
+        private org.json.JSONObject get(String url) throws Exception {
+            HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
+            c.setRequestProperty("User-Agent", "rook_panel");
+            c.setConnectTimeout(8000);
+            c.setReadTimeout(8000);
+            try {
+                if (c.getResponseCode() != 200) throw new IOException("HTTP " + c.getResponseCode());
+                BufferedReader r = new BufferedReader(
+                    new InputStreamReader(c.getInputStream(), StandardCharsets.UTF_8));
+                StringBuilder b = new StringBuilder();
+                for (String l = r.readLine(); l != null; l = r.readLine()) b.append(l);
+                r.close();
+                return new org.json.JSONObject(b.toString());
+            } finally {
+                c.disconnect();
+            }
+        }
+
+        /**
+         * WMO weather code to one of the seven pictures drawn by drawSky.
+         * Codes come from Open-Meteo's documented table; anything unlisted
+         * falls to cloud, which is the honest answer for "something, not
+         * clear".
+         */
+        private static String kind(int code) {
+            switch (code) {
+                case 0:              return "sun";
+                case 1:              return "fair";
+                case 2: case 3:      return "cloud";
+                case 45: case 48:    return "fog";
+                case 71: case 73: case 75: case 77:
+                case 85: case 86:    return "snow";
+                case 95: case 96: case 99: return "storm";
+                default:
+                    if (code >= 51 && code <= 67) return "rain";
+                    if (code >= 80 && code <= 82) return "rain";
+                    return "cloud";
             }
         }
     }

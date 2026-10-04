@@ -43,9 +43,6 @@ type PanelController struct {
 	conn     net.Conn
 	last     string
 	lastSend time.Time
-	// Last weather frame, resent after a redial so a restarted panel does
-	// not sit without it until the controller's next poll.
-	wx []byte
 }
 
 func NewPanelController() *PanelController { return &PanelController{} }
@@ -120,7 +117,6 @@ func (p *PanelController) SetLEDs(leds ...led.Led) error {
 		if err := p.dial(); err != nil {
 			return nil // panel absent; never fail a turn over the display
 		}
-		p.resendWeather()
 	}
 	if err := p.write(line); err != nil {
 		log.Printf("[panel] write failed, will redial: %v", err)
@@ -128,36 +124,6 @@ func (p *PanelController) SetLEDs(leds ...led.Led) error {
 	}
 	p.last = s
 	p.lastSend = time.Now()
-	return nil
-}
-
-// SetWeather tells the panel the outside temperature, in Celsius, and
-// which picture to draw (sun, fair, cloud, fog, rain, snow, storm).
-// A board with no panel ignores it — the display is optional, a turn is not.
-func (p *PanelController) SetWeather(temp int, kind string) error {
-	line, err := json.Marshal(struct {
-		Wx struct {
-			T int    `json:"t"`
-			K string `json:"k"`
-		} `json:"wx"`
-	}{Wx: struct {
-		T int    `json:"t"`
-		K string `json:"k"`
-	}{T: temp, K: kind}})
-	if err != nil {
-		return err
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.wx = line
-	if p.conn == nil {
-		if err := p.dial(); err != nil {
-			return nil
-		}
-	}
-	if err := p.write(line); err != nil {
-		log.Printf("[panel] weather write failed: %v", err)
-	}
 	return nil
 }
 
@@ -173,14 +139,4 @@ func (p *PanelController) write(line []byte) error {
 		return err
 	}
 	return nil
-}
-
-// resendWeather repeats the last weather line. The caller holds p.mu and
-// has a live connection. Used after a redial, so a panel that restarted
-// does not wait for the controller's next poll.
-func (p *PanelController) resendWeather() {
-	if len(p.wx) == 0 || p.conn == nil {
-		return
-	}
-	_, _ = p.conn.Write(append(p.wx, '\n'))
 }
