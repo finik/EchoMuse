@@ -26,41 +26,44 @@
 # so `PCM Playback Volume` can end at 0 while the log reads "Volume set to
 # 110/127" and playback reports no underruns into silence. Magisk runs service.d
 # once per boot, so this guard is for hand restarts.
-LOCK=/data/local/tmp/start_server_rook.lock
-# The lock must name the process as well as its pid, because /data/local/tmp
-# SURVIVES A REBOOT — this board has no real /tmp, which is why the lock lives
-# here at all. The trap below clears it on every ordinary exit, but a power cut
-# is not an exit, so the file outlives the boot holding a pid from the previous
-# one. Android then hands that same low pid to one of the hundreds of processes
-# it starts before service.d runs, `[ -d /proc/$OLD ]` says "alive", and this
-# script exits believing the daemon is already up. The daemon never starts: the
-# screen shows no ring, the mic streams nothing, and the device answers nothing
-# until somebody deletes a file. Seen on the Bedroom Spot 2026-10-03, on two
-# consecutive power cycles, 50 minutes apart.
+# The lock lives on TMPFS, so a reboot cannot leave one behind.
 #
-# So the check is the pid AND what it is running. A stale pid now reads as
-# stale, which is what the original comment assumed a reboot would guarantee.
+# It was /data/local/tmp — persistent storage, because this board has no real
+# /tmp — and the trap below only clears it on an ordinary exit. A power cut is
+# not an exit, so the file outlived the boot holding a pid from the previous
+# one, Android handed that pid to something it starts before service.d, and
+# this script exited believing the daemon was already up. The daemon never
+# started: no ring, no mic, the device answers nothing until somebody deletes
+# a file. Seen on the Bedroom Spot 2026-10-03 and again on the morning of
+# 10-04, where the log reads "already running as pid 1" — pid 1 being init.
 #
-# grep reads /proc/<pid>/cmdline directly, NUL separators and all, because this
-# board's shell has no `tr` — nor `tail`, `head` or `md5sum`. Anything written
-# for it has to be checked on it; the obvious `tr '\0' ' ' | grep` version
-# silently reports every lock as stale here, which removes the protection
-# above rather than fixing it.
+# Checking what the pid is RUNNING was the first fix and it is not enough: by
+# hand it correctly rejects pid 1, at boot it still matched, and after two
+# attempts the reason is still unexplained. This removes the question instead.
+# AND NOTE WHERE THIS FILE HAS TO BE INSTALLED. On Magisk 17.3 here,
+# /data/adb/service.d/ and /sbin/.core/img/.core/service.d/ are DIFFERENT
+# FILES, and Magisk runs the one inside magisk.img. Installing to
+# /data/adb/service.d alone changes nothing and the old script keeps running,
+# which is how the first fix for this passed every hand test and failed every
+# boot: two copies, each being read by a different reader. Install to both.
+#
+# Magisk runs service.d once per boot, so at boot a lock can only be stale;
+# the only thing the lock has ever had to prevent is two HAND restarts
+# colliding, and those share a boot and therefore share /dev.
+LOCK=/dev/start_server_rook.lock
 if [ -f "$LOCK" ]; then
     OLD=$(cat "$LOCK" 2>/dev/null)
+    # Still check what the pid is running, for the hand-restart case: pids are
+    # reused within a boot too.
     if [ -n "$OLD" ] && [ -r "/proc/$OLD/cmdline" ] &&
        grep -q start_server_rook "/proc/$OLD/cmdline" 2>/dev/null; then
         echo "[start_server_rook] already running as pid $OLD — exiting" >> /data/local/tmp/server.log
         exit 0
     fi
-    if [ -n "$OLD" ]; then
-        echo "[start_server_rook] stale lock from pid $OLD (not ours) — taking it" >> /data/local/tmp/server.log
-    fi
+    echo "[start_server_rook] stale lock from pid $OLD — taking it" >> /data/local/tmp/server.log
 fi
 echo $$ > "$LOCK"
-# Drop the lock on any exit path, so a crash does not wedge the next start.
-# A power cut still leaves it behind; the cmdline check above is what makes
-# that harmless.
+# Tidies up after an ordinary exit; a power cut no longer needs it to.
 trap 'rm -f "$LOCK"' EXIT INT TERM
 
 LOG=/data/local/tmp/server.log
