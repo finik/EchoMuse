@@ -3142,7 +3142,17 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown",
                     # way, just distinguished from an initial accidental wake
                     # by the longer FOLLOWUP_NO_SPEECH_TIMEOUT grace period.
                     log.info(f"[{device.device_id}] Opening follow-up listening window ({FOLLOWUP_NO_SPEECH_TIMEOUT}s)")
-                    await device.mic_start()
+                    # Same split as the continuation branch above, and for the
+                    # same reason: a private Echo sends NOTHING on the wake
+                    # stream, so reopening it here listens to silence for nine
+                    # seconds and the window can only ever end in a timeout.
+                    # The follow-up rides a bounded turn stream instead, as a
+                    # button press does.
+                    if device.private_listening:
+                        await device.mic_stop()
+                        await device.mic_start_turn()
+                    else:
+                        await device.mic_start()
                     drained = 0
                     while not device.voice_queue.empty():
                         try:
