@@ -466,22 +466,36 @@ public class PanelActivity extends Activity {
      */
     private static final class WeatherPoll implements Runnable {
         private static final long PERIOD_MS = 20 * 60 * 1000L;
+        /** Doubling to PERIOD_MS, so a boot race costs seconds not minutes. */
+        private static final long FIRST_RETRY_MS = 15 * 1000L;
         private final PanelView view;
 
         WeatherPoll(PanelView view) { this.view = view; }
 
         @Override public void run() {
             boolean quiet = false;
+            long retry = FIRST_RETRY_MS;
             while (true) {
+                long wait;
                 try {
                     double[] at = place();
                     if (at != null) current(at[0], at[1]);
                     quiet = false;
+                    retry = FIRST_RETRY_MS;
+                    wait = PERIOD_MS;
                 } catch (Exception e) {
+                    // The app starts before wifi associates, so the FIRST
+                    // attempt normally fails with UnknownHostException — the
+                    // panel was up 22s before the daemon connected on the
+                    // bench. Sleeping the full period there leaves the clock
+                    // bare for 20 minutes over a race that resolves in
+                    // seconds, which is what shipping without this did.
                     if (!quiet) Log.w(TAG, "weather: " + e);
                     quiet = true;
+                    wait = retry;
+                    retry = Math.min(retry * 2, PERIOD_MS);
                 }
-                try { Thread.sleep(PERIOD_MS); } catch (InterruptedException e) { return; }
+                try { Thread.sleep(wait); } catch (InterruptedException e) { return; }
             }
         }
 
