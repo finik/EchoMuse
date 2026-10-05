@@ -471,10 +471,67 @@ Typical wake scores on this unit are 0.44–0.94, with marginal utterances near
 1. Unlock with amonet-rook v2.0.0 from a Linux VM; escrow boot; verify SHA256.
 2. Patch `default.prop` + permissive cmdline; flash; Magisk 17.3; seed
    `magisk.db`.
-3. Install the four `service.d` scripts **into `magisk.img`**, the firmware to
-   `/data/local/bin/server`, the panel APK to `/system/app/`; reboot.
-4. `pm hide` the two Amazon UI packages; set the two screen settings.
-5. Create the §5 config — especially `owwOnDevice: off` and
-   `owwSpeexNs: false`.
-6. Add ESPHome in HA at `<controller-ip>:<device port>`.
+3. `pm hide` the two Amazon UI packages; set the two screen settings.
+4. **`device/scripts/deploy_rook.sh <serial>`** — see §8. It installs the
+   service.d scripts (both copies), the firmware, the wake-word runtime and
+   the panel APK, each verified by md5 at both ends, and is safe to re-run.
+5. Reboot, then set the device's config per §5.
+6. Add ESPHome in HA at `<controller-ip>:<device port>`, and give the device's
+   `assist_satellite` an AREA — see §8's note on duplicates.
 7. Measure `wakeCh` per §4 and rebuild.
+
+## 8. Deploying to a unit (`device/scripts/deploy_rook.sh`)
+
+What a working Spot needs is seven things in four places, and doing it by hand
+is how two of them get forgotten. Both of those fail **silently**, which is the
+reason this is a script and not a list:
+
+| What | Where | If missing |
+|---|---|---|
+| `00/01/02/03-rook-*.sh`, `50-start_server_rook.sh` | `service.d`, **both copies** | the old script keeps running at every boot |
+| `server` | `/data/local/bin/` | — |
+| `libonnxruntime.so`, `silero_vad.onnx` | `/data/local/share/echomuse/oww/` | the Echo cannot score its own wake word, so it **streams** instead, and every panel reports it healthy |
+| wake models (`melspectrogram`, `embedding_model`, a classifier) | same | as above; installed from the dashboard's Updates tab |
+| `RookPanel.apk` | `/system/app/RookPanel/` | no clock, no ring |
+
+**The two copies of `service.d` are the trap worth knowing.** On Magisk 17.3
+here, `/data/adb/service.d/` and `/sbin/.core/img/.core/service.d/` are
+DIFFERENT FILES and Magisk runs the one inside `magisk.img`. A fix installed to
+`/data/adb/service.d` alone changes nothing: it passes every test run by hand
+and fails at every boot, because one file is being tested and another is being
+run. That cost a day on 2026-10-03/04 — a start-script lock fix that "worked"
+in isolation and left the daemon unstarted on every power cycle. The script
+writes and verifies both.
+
+**Transfers are verified by md5 at both ends**, into a staging file and moved
+only on match: a truncated push is the right size and fails later at `dlopen`
+or `exec` with an error naming nothing. The device has no `md5sum` on PATH, so
+Magisk's busybox is used — and **where that lives moved between boots on these
+units** (`/data/adb/magisk/busybox`, then `/sbin/.core/busybox/`), so it is
+resolved at run time. No busybox means no verification, and the script refuses
+rather than send unverified bytes.
+
+**Every device command goes through a pushed file, never an inline string.**
+`adb shell "su -c \"...\""` is parsed by the device's own shell before `su`
+sees it, so `$VAR` expands there — to nothing — and the command quietly does
+something else. The busybox probe above reported "no busybox" on a unit that
+has it, for exactly this reason.
+
+Three things the script deliberately leaves alone, because they are controller
+and HA state rather than files on the device:
+
+- **`owwOnDevice: "on"`**, so the Echo detects its own wake word and stops
+  streaming. Trust `listen_state: local` in the log over the setting — the
+  claim is the Echo's own.
+- **An AREA on the device's `assist_satellite`**, or area-less commands
+  ("turn on the lights", "close the blinds") have nothing to resolve against.
+  **Check which entity you are assigning**: a device that re-registers can
+  leave HA holding a stale duplicate, and the Bedroom Spot ran with its area
+  on an `unavailable` orphan while the live `..._2` entity had none. The live
+  one is the one whose state is not `unavailable`.
+- **Aliases on the things it will be asked about.** Give every room's
+  preferred cover the SAME alias (`blinds`); when a name matches several
+  entities HA picks the one in the satellite's area, and that ambiguity is
+  what makes it context-aware — a unique alias destroys it. Include the
+  singular: Whisper transcribed "open blinds" as **`Open blind.`**, which
+  matched nothing and sent HA to the area, where two covers made it ask which.
