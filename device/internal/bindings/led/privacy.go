@@ -29,11 +29,37 @@ var (
 	privacyPath string
 )
 
+// Two layouts, because the driver is not packaged the same way on every board.
+// biscuit's FireOS 6 kernel puts the attributes in an `amz_privacy` subnode;
+// rook's FireOS 5 kernel exposes them DIRECTLY on the keypad
+// (/sys/devices/soc/10010000.keypad/privacy_state), with no subnode.
+//
+// Matching only the first shape left PrivacyDriver() false on rook, so the
+// reconciliation never ran there and the two mutes drifted apart — ours and
+// Amazon's, each toggled by the same button press and neither aware of the
+// other. One of them is then always muting the microphone, the red LED and
+// the red ring disagree, and no sequence of presses clears both because a
+// press moves them together. Seen on the Bedroom Spot 2026-10-03 and the
+// Family Room 10-04.
+//
+// This also corrects a belief recorded elsewhere, that "FireOS 5's kernel has
+// no such driver". True of biscuit, false of rook: a FireOS 5 board can have
+// it. Which is why no Dot ever hit this — a FireOS 5 Dot genuinely has no
+// second mute, so EchoMuse's own is the only one.
+//
+// Still resolved by GLOB rather than a fixed path: 10010000 is an address,
+// not a name, and the resolve-by-name rule applies here as it does to event
+// nodes and i2c.
 func privacyDir() string {
 	privacyOnce.Do(func() {
-		matches, _ := filepath.Glob("/sys/devices/soc/*/amz_privacy/privacy_state")
-		if len(matches) > 0 {
-			privacyPath = filepath.Dir(matches[0])
+		for _, pat := range []string{
+			"/sys/devices/soc/*/amz_privacy/privacy_state",
+			"/sys/devices/soc/*/privacy_state",
+		} {
+			if matches, _ := filepath.Glob(pat); len(matches) > 0 {
+				privacyPath = filepath.Dir(matches[0])
+				return
+			}
 		}
 	})
 	return privacyPath
