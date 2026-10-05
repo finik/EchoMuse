@@ -154,14 +154,18 @@ func TestRookButtonsResolveByName(t *testing.T) {
 	}
 }
 
-// biscuit has a discrete LED under its mute button and must keep driving it;
-// rook has none and must not try, or it logs a fault every boot and toggle.
+// Both boards have an LED under the mute button.
+//
+// rook said false here until 2026-10-04, taken from its device tree's "LEDs:
+// none besides the backlight" rather than from a device. A muted Spot lights
+// a red button, which disproved it. The flag matters beyond the light: with
+// it false the firmware never looks for Amazon's privacy driver, so its mute
+// and ours drift apart and one of them silently holds the microphone.
 func TestMuteLEDIsPerBoard(t *testing.T) {
-	if !biscuit.Buttons.HasMuteLED {
-		t.Error("biscuit has an LED under the mute button (gpio444) — it must still be driven")
-	}
-	if rook.Buttons.HasMuteLED {
-		t.Error("rook has no mute-button LED; attempting it logs a fault every boot")
+	for _, p := range []*Profile{biscuit, rook} {
+		if !p.Buttons.HasMuteLED {
+			t.Errorf("%s has an LED under the mute button and must drive or reconcile it", p.Name)
+		}
 	}
 }
 

@@ -264,7 +264,13 @@ var rook = &Profile{
 		ActionPath:  "/dev/input/event1",
 		VolumePath:  "/dev/input/event4",
 		MuteKeyCode: 116, // KEY_POWER
-		Grab:        true,
+		// rook HAS a mute LED, and Amazon's privacy driver owns it — the same
+		// arrangement as a FireOS 6 biscuit, on a FireOS 5 board. This said
+		// false until 2026-10-04, which was read off the DT's "LEDs: none
+		// besides the backlight" rather than off a device; the lit red button
+		// on a muted unit is what disproved it.
+		HasMuteLED: true,
+		Grab:       true,
 	},
 	// No /dev/stpbt. See HasBLEProxy.
 	HasBLEProxy: false,
@@ -321,4 +327,3 @@ func Names() []string {
 	}
 	return out
 }
-

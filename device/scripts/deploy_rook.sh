@@ -77,7 +77,12 @@ push_verify() {
     adb -s "$S" push "$src" /data/local/tmp/.stage >/dev/null 2>&1 || { bad "push failed: $dst"; return 1; }
     local staged; staged=$(sh_ "$MD5 /data/local/tmp/.stage" | cut -d' ' -f1)
     [ "$staged" != "$want" ] && { bad "$dst: staged md5 $staged != $want"; return 1; }
-    sh_ "mkdir -p '$(dirname "$dst")'; cp /data/local/tmp/.stage '$dst'; chmod $mode '$dst'; chown root:root '$dst'; rm -f /data/local/tmp/.stage" >/dev/null
+    # mv, not cp: cp truncates in place and fails with ETXTBSY on a RUNNING
+    # executable, so the daemon's own binary silently stayed at the old
+    # version while the push reported success. A rename swaps the directory
+    # entry and leaves the running process on the old inode, which is both
+    # atomic and what lets the next boot pick the new one up.
+    sh_ "mkdir -p '$(dirname "$dst")'; mv -f /data/local/tmp/.stage '$dst'; chmod $mode '$dst'; chown root:root '$dst'" >/dev/null
     local final; final=$(sh_ "$MD5 '$dst'" | cut -d' ' -f1)
     [ "$final" = "$want" ] && good "$dst" || bad "$dst: md5 $final != $want after move"
 }
