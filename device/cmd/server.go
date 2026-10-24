@@ -1245,15 +1245,19 @@ func applyHardwareConfig(msg config.ConfigMessage) {
 	// offered it, the config stored it, and the mic stayed where it was —
 	// a control that appeared to work. Absent is still absent, so firmware
 	// meeting a controller that omits the key behaves as it always did.
+	// Over the board's OWN converters, not a fixed A..D: on a two-converter
+	// board half of these writes fail, and the gain path swallows that
+	// silently — a mic gain that appears to apply and does not.
+	adcs := board.CurrentLayout().Mics.ADCs
 	if msg.AdcDigitalGain != nil {
 		g := strconv.Itoa(*msg.AdcDigitalGain)
-		for _, adc := range []string{"A", "B", "C", "D"} {
+		for _, adc := range adcs {
 			mixer.Set("ADC_"+adc+" Digital Volume Control", g)
 		}
 	}
 	if msg.AdcMicpga != nil {
 		g := strconv.Itoa(*msg.AdcMicpga)
-		for _, adc := range []string{"A", "B", "C", "D"} {
+		for _, adc := range adcs {
 			mixer.Set("ADC_"+adc+" MICPGA Volume Ctrl", g)
 		}
 	}
@@ -1570,6 +1574,15 @@ func syncListenState(dc *client.DataClient, cc *client.ControlClient, force bool
 func applyBleConfig(scanner *bluetooth.Scanner, bridge *bluetooth.Bridge) {
 	snap := config.Get().Snapshot()
 	proxy := snap.BleProxyEnabled != nil && *snap.BleProxyEnabled
+	// The controller's toggle is fleet-wide in shape, and a board with no
+	// HCI character device has nothing to open. Dropped here with a line
+	// saying so, rather than discovered as a transport error after the
+	// scanner has started — rook's Broadcom radio is H4 over UART and has
+	// no /dev/stpbt at all.
+	if proxy && board.CurrentLayout().HCI == "" {
+		log.Printf("[ble] proxy requested but this board has no HCI device — left off")
+		proxy = false
+	}
 	scanner.SetEnabled(proxy)
 	sendspinProxy(scanner.Enabled())
 	// Connections live inside the scan session, so they need the proxy on.

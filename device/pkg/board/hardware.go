@@ -541,3 +541,123 @@ func CurrentLayout() *Layout {
 	resolveCurrent()
 	return currentLayout
 }
+
+// rookMics is the Echo Spot's array. The capture codec is a TLV320AIC3101
+// with TWO ADCs taking four mics differentially, and the driver reports a
+// FIXED six channels (`tinypcminfo -D 0 -d 24`: channels min=max=6). Four
+// mics on ch0-3.
+//
+// ch4 and ch5 are a stereo playback loopback, not idle channels. Exact
+// digital zero in silence is what a loopback looks like when nothing is
+// playing, and that was misread as "no reference" until a tone was played
+// (2026-10-02, this unit): a 0.1 FS 1kHz tone came back on the playing side
+// at -23.0 dBFS RMS while the mics sat near -46. Left-only playback appears
+// on ch4 and is inaudible; right-only appears on ch5 and is what the mics
+// hear. The speaker is the right channel, so the reference is ch5 — the same
+// "driver emits both, only the right reaches the speaker" split as biscuit.
+//
+// There is no centre mic, so the wake word takes the FIRST perimeter entry,
+// and ch2 is listed first for that reason. It is ch2 by MEASUREMENT, not
+// geometry: the four capsules sit within 0.5dB of each other in level and
+// SNR, so loudness says nothing about which one the classifier prefers.
+// Utterances that fire out of 5, two recordings scored offline against the
+// controller's own model and threshold:
+//
+//	         rec1  rec2
+//	ch0        2     2
+//	ch1        1     2
+//	ch2        3     4      <- matches max-of-4 with no protocol change
+//	ch3        1     3
+//	max-of-4   3     5
+//
+// Two alternatives are worse and should not be reinstated: averaging the
+// four comb-filters the speech, since the capsules are physically separated
+// (0.478 against 0.906 for the best capsule on one utterance); selecting by
+// energy picks the loudest capsule rather than the clearest. Do NOT "fix"
+// this by summing them either — at this aperture diffuse-field noise is
+// 0.84-0.99 correlated below 1.5kHz, so a sum has nothing uncorrelated to
+// cancel.
+//
+// This is a property of which capsule faces the room, so re-measure per unit
+// and after moving a device — and that is the weakness. biscuit also takes
+// its wake stream from a fixed channel, but ch6 is its omnidirectional
+// CENTRE mic and so is placement-independent by construction; this is a rim
+// capsule chosen by measurement.
+//
+// The angles are PLACEHOLDERS, evenly spaced, not the real bearings. They
+// affect the REPORTED direction only: channel selection is by onset energy
+// and is unaffected, and rook has no ring to draw a direction arc on.
+// Measuring the real bearings is an open item, so the perimeter is ordered
+// by wake preference rather than by angle.
+var rookMics = MicArray{
+	Channels: 6,
+	Perimeter: []Mic{
+		{Ch: 2, Angle: 180}, {Ch: 3, Angle: 270}, {Ch: 0, Angle: 0}, {Ch: 1, Angle: 90},
+	},
+	Centre:  -1,
+	EchoRef: 5,
+}
+
+// rookMicMutes: the AIC3101 has two converters, not the AIC32x4's four, so a
+// fixed A..D failed half its writes on a Spot and logged "4 of 8 ADC mute
+// controls failed" on every toggle — a warning on healthy hardware, which is
+// how people learn to ignore the log.
+var rookMicMutes = []string{
+	"ADC_A Left Mute", "ADC_A Right Mute",
+	"ADC_B Left Mute", "ADC_B Right Mute",
+}
+
+// rookRoutes: the AIC3101 has two ADCs, so only A and B are closed. Writing
+// C and D is harmless to the audio and makes a healthy boot log "2 of 10
+// DAPM routes failed - audio may be silent", a warning that points at
+// nothing. Amazon's own rook config sets exactly A and B (its
+// audio_device.xml, read via techo5's firmware dump).
+var rookRoutes = []Ctl{
+	{"ADC_B Right Ip Select ADC_B DIF1_R switch", []string{"1"}},
+	{"ADC_B Left Ip Select ADC_B DIF1_L switch", []string{"1"}},
+	{"ADC_A Right Ip Select ADC_A DIF1_R switch", []string{"1"}},
+	{"ADC_A Left Ip Select ADC_A DIF1_L switch", []string{"1"}},
+
+	{"HPR Output Mixer R_DAC Switch", []string{"1"}},
+	{"HPL Output Mixer L_DAC Switch", []string{"1"}},
+}
+
+var rookInputGains = []Ctl{
+	{"ADC_A DIF1_L Input Gain", []string{"0"}},
+	{"ADC_A DIF1_R Input Gain", []string{"0"}},
+	{"ADC_B DIF1_L Input Gain", []string{"0"}},
+	{"ADC_B DIF1_R Input Gain", []string{"0"}},
+}
+
+var rookHardware = &Hardware{
+	Keys: []Input{
+		{Name: "mtk-kpd", Fallback: "/dev/input/event1"}, // action (KEY_POWER)
+		{Name: "keys", Fallback: "/dev/input/event4"},    // volume
+	},
+	// No i2c ring: the round LCD replaces it, and internal/bindings/led's
+	// panel controller stands in behind the same led.Controller interface.
+	//
+	// rook HAS a mute LED and Amazon's privacy driver owns it — the same
+	// arrangement as a FireOS 6 biscuit, on a FireOS 5 board — so none is
+	// stated here and server/privacy.go reconciles the two mutes instead.
+	// This said "no LED" until 2026-10-04, read off the device tree's "LEDs:
+	// none besides the backlight" rather than off a device; the lit red
+	// button on a muted unit is what disproved it.
+	Capture:    PCM{Name: "TLV320AIC3101 Capture", Fallback: &PCMAddr{0, 24}},
+	Playback:   PCM{Name: "TLV320AIC3204 Playback", Fallback: &PCMAddr{0, 23}},
+	Mics:       rookMics,
+	MicMutes:   rookMicMutes,
+	Routes:     rookRoutes,
+	InputGains: rookInputGains,
+	// No /dev/stpbt. rook's Broadcom BCM43569 speaks H4 over UART, so the
+	// node MediaTek's combo chip exposes is simply not there and the BLE
+	// proxy cannot run.
+	HCI: "",
+	Speaker: Speaker{
+		AmpSwitch: tlvAmp,
+		Volume:    tlvVolume,
+		Jack:      tlvJack,
+		// biscuit's band until the Spot's own driver is measured.
+		BassGuard: BassBand{CrossoverHz: 115, ThresholdDb: -50},
+	},
+}

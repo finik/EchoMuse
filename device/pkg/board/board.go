@@ -56,8 +56,25 @@ var Donut = &Board{
 	Hardware:     donutHardware,
 }
 
+// Rook is the Echo Spot 1st gen (2017), also MT8163 — the first supported
+// board with a screen instead of an LED ring. Read off a unit on FireOS 5
+// (2026-10-02): /proc/idme/device_type_id = A10A33FOX2NUBK, with
+// ro.product.device "rook" and ro.product.model "AEORK".
+//
+// Tuning is deliberately nil. rook's stock thermal and hotplug policy has
+// not been read off a device, and nil means "touch nothing" — the kernel
+// defaults stay in force, which per this package's own rule are the
+// stricter side. Writing biscuit's trip points onto a board with a screen
+// and a different enclosure is exactly the failure this package exists to
+// prevent.
+var Rook = &Board{
+	ID:           "rook",
+	DeviceTypeID: "A10A33FOX2NUBK",
+	Hardware:     rookHardware,
+}
+
 // Known is every board the firmware can identify.
-var Known = []*Board{Biscuit, Radar, Donut}
+var Known = []*Board{Biscuit, Radar, Donut, Rook}
 
 // Detect returns the board beneath root, or nil when none matches. root is ""
 // on a device and a fixture directory in tests.

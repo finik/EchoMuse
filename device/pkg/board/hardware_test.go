@@ -511,3 +511,76 @@ func TestTLVJackIsStocks(t *testing.T) {
 		t.Errorf("amp: insert %v, remove %v", tlvJack.Insert[0], tlvJack.Remove[2])
 	}
 }
+
+// There is no rook fixture: these assert the board's STATED hardware rather
+// than resolving it beneath a captured /proc, because no dump of a Spot's
+// sysfs has been taken. A fixture written from memory would make the test
+// pass against a fiction, which is worse than a narrower test.
+func TestRookStatesTheSpotsArray(t *testing.T) {
+	m := Rook.Hardware.Mics
+	// The driver reports a FIXED six channels (tinypcminfo -D 0 -d 24),
+	// four mics and a stereo playback loopback. Reading nine here strides
+	// mid-sample and every value is garbage that still looks like audio.
+	if m.Channels != 6 {
+		t.Errorf("channels %d, want 6", m.Channels)
+	}
+	if m.NumMics() != 4 {
+		t.Errorf("%d microphones, want 4", m.NumMics())
+	}
+	// ch5 is the RIGHT loopback, which is the side the speaker plays; ch4 is
+	// the left and carries audio nobody heard.
+	if m.EchoRef != 5 {
+		t.Errorf("echo reference ch%d, want ch5 — ch4 is the inaudible left side", m.EchoRef)
+	}
+	// No centre mic, so the wake word takes the first perimeter entry. That
+	// is ch2 by measurement, not geometry: the four capsules sit within
+	// 0.5dB of each other and ch2 scored about twice as well as the loudest
+	// (ch0), so the ORDER of Perimeter is load-bearing here.
+	if m.Centre != -1 {
+		t.Errorf("centre ch%d, want -1: the Spot has no centre microphone", m.Centre)
+	}
+	if m.Perimeter[0].Ch != 2 {
+		t.Errorf("wake channel ch%d, want ch2", m.Perimeter[0].Ch)
+	}
+	// Every microphone is a channel of the frame, and none of them is the
+	// loopback pair.
+	for _, mic := range m.Perimeter {
+		if mic.Ch < 0 || mic.Ch > 3 {
+			t.Errorf("ch%d is not one of the four microphones (ch0-3)", mic.Ch)
+		}
+	}
+}
+
+func TestRookAddressesTwoConvertersOnly(t *testing.T) {
+	want := []string{
+		"ADC_A Left Mute", "ADC_A Right Mute",
+		"ADC_B Left Mute", "ADC_B Right Mute",
+	}
+	if !reflect.DeepEqual(Rook.Hardware.MicMutes, want) {
+		t.Fatalf("mic mutes %v, want %v", Rook.Hardware.MicMutes, want)
+	}
+	for _, c := range append(append([]Ctl{}, rookRoutes...), rookInputGains...) {
+		if strings.Contains(c.Name, "ADC_C") || strings.Contains(c.Name, "ADC_D") {
+			t.Errorf("%q addresses a converter this board does not have", c.Name)
+		}
+	}
+}
+
+// rook's Broadcom BCM43569 is H4 over UART, so the node MediaTek's combo
+// chip exposes is simply absent and the proxy cannot run. Stated, never
+// assumed: a node of the same name can exist on a board whose radio is not
+// behind it.
+func TestRookHasNoHCINodeAndNoTuning(t *testing.T) {
+	if Rook.Hardware.HCI != "" {
+		t.Errorf("hci %q, want none", Rook.Hardware.HCI)
+	}
+	// The Spot's stock thermal policy has never been read off a device, and
+	// nil keeps the kernel defaults — the stricter side.
+	if Rook.Tuning != nil {
+		t.Error("rook must carry no thermal profile until one is measured")
+	}
+	// The mute LED is Amazon's privacy driver's, as on donut, not a GPIO.
+	if Rook.Hardware.MuteLEDGPIO != "" {
+		t.Errorf("mute LED gpio %q: the privacy driver owns this LED", Rook.Hardware.MuteLEDGPIO)
+	}
+}
