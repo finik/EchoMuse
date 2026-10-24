@@ -20,8 +20,12 @@ def test_radar_is_its_own_model():
 
 
 def test_a_board_newer_than_the_controller_is_not_called_biscuit():
-    assert em_boards.model("rook") == "Echo (rook)"
-    assert em_boards.known("rook")
+    # Deliberately an id no firmware reports. This read "rook" until the Spot
+    # was added, at which point the case it was written for stopped being
+    # tested — the point is a board this controller has never heard of, so it
+    # has to name one that does not exist rather than the newest that does.
+    assert em_boards.model("herring") == "Echo (herring)"
+    assert em_boards.known("herring")
 
 
 def test_every_model_survives_project_name_split():

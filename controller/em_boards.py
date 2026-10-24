@@ -22,6 +22,7 @@ MODELS = {
     "biscuit": "Echo Dot Gen 2 (biscuit)",
     "radar": "Echo Gen 2 (radar)",
     "donut": "Echo Dot Gen 3 (donut)",
+    "rook": "Echo Spot Gen 1 (rook)",
 }
 
 # No board reported is firmware from before boards (biscuit only), and
