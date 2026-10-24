@@ -50,7 +50,7 @@ from pathlib import Path
 
 import numpy as np
 
-log = logging.getLogger(__name__)
+log = logging.getLogger("echomuse.mww")
 
 # Model + config live beside the controller, not in the DB directory: they are
 # code-adjacent constants shipped with the release, not per-install state.
