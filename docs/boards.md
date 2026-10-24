@@ -4,8 +4,9 @@ The firmware is one binary. At start-up it works out which board it is on,
 looks up where that board's parts are **by name**, and opens what it found.
 Adding a board means describing it in one file; the drivers stay as they are.
 
-Two boards are described: the Echo Dot 2nd gen (`biscuit`) and the Echo 2nd
-gen (`radar`). This page is for anyone trying the firmware on something else.
+Four boards are described: the Echo Dot 2nd gen (`biscuit`), the Echo 2nd
+gen (`radar`), the Echo Dot 3rd gen (`donut`) and the Echo Spot 1st gen
+(`rook`). This page is for anyone trying the firmware on something else.
 
 Related reading: [`porting/README.md`](../porting/README.md) for the scripts
 that profile an unsupported Echo, and
@@ -299,3 +300,53 @@ An MT8167 board with its own layout; no input device or PCM shares the Dot
   into the chip at the start of every Bluetooth session; without it every
   Dot 2 shares one default address. A new board gets this if its idme has
   the address.
+
+## The Echo Spot 1st gen (`rook`)
+
+Read from units running stock FireOS 5 through 2026-10. Another MT8163, and
+the first supported board with a **screen instead of an LED ring**: there is
+no is31fl3236, and `internal/bindings/led`'s panel controller stands in
+behind the same `led.Controller` interface, so every existing cue drives the
+round LCD with no parallel code path. The ring is tried first and the panel
+only if no i2c ring answers — the i2c probe fails instantly where there is
+no chip, while the panel probe waits on an Android app that may still be
+launching.
+
+There is **no fixture** for this board. No dump of a Spot's `/proc` has been
+taken, so its tests assert the stated `Hardware` rather than resolving it
+beneath captured sysfs. A fixture written from memory would make them pass
+against a fiction.
+
+- **Buttons.** `mtk-kpd` (event1) carries the action button, and it reports
+  `KEY_POWER` — there is no mute key on this board. `keys` (event4) carries
+  volume. event2 is `hwmdata`, a sensor stream that delivers events forever
+  while no button works, which is the board the resolve-by-name rule was
+  written for.
+- **The mute LED is Amazon's**, as on the Dot 3: the `amz_privacy` driver
+  owns it, so the board states no GPIO and `server/privacy.go` reconciles
+  the two mutes instead. rook exposes the driver's attributes DIRECTLY on
+  the keypad with no subnode, unlike every other board carrying it.
+- **Microphones.** `TLV320AIC3101 Capture`, a **fixed 6 channels** of
+  S24_3LE (`tinypcminfo -D 0 -d 24`: channels min=max=6). Four mics on
+  ch0-3 and **no centre capsule**; ch4/ch5 are a stereo playback loopback.
+  The echo reference is **ch5**, the right side, because that is the side
+  the speaker plays — ch4 carries audio nobody heard. The wake stream takes
+  **ch2**, chosen by measurement rather than geometry: the four capsules sit
+  within 0.5dB of each other, and ch2 scored about twice as well as the
+  loudest. Re-measure after moving a unit; a rim mic is placement-dependent
+  in a way the Dot's centre mic is not.
+- **Two ADCs, not four.** The AIC3101 has converters A and B, so the routes,
+  the input gains, the mic gains and the ADC mute all iterate the board's
+  list. A fixed A..D fails half its writes here and logs warnings on healthy
+  hardware.
+- **Bluetooth: none.** The Broadcom BCM43569 speaks H4 over UART, so there
+  is no `/dev/stpbt` and the BLE proxy cannot run. A request to enable it is
+  dropped with a log line.
+- **No thermal profile.** The Spot's stock policy has not been read off a
+  device, so emOS runs the kernel's defaults — the stricter side.
+- The capsules' physical bearings are **unmeasured**: the steering angles
+  are evenly spaced placeholders and affect the reported direction only.
+  rook has no ring to draw a direction arc on.
+
+Bring-up notes, the hardware map and the procedure are in
+`docs/rook-bringup.md`.
