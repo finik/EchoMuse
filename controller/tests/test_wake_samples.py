@@ -136,69 +136,36 @@ def test_sample_labels_are_scoped_and_validated(fresh_db):
     assert db.get_wake_samples("dev1")[0]["label"] == "not_wake"
 
 
-def test_retention_is_bounded_per_device(fresh_db):
-    for i in range(samples.KEEP_PER_DEVICE + 3):
+def test_samples_are_never_pruned_by_count(fresh_db):
+    # Training data: inserting well past the old 50-per-device cap must keep
+    # every row, oldest included.
+    for i in range(53):
         db.insert_wake_sample("dev1", {
             "ts": i, "audio_file": samples.filename("dev1"), "kind": "candidate",
             "score": .3, "threshold": .5,
         })
     rows = db.get_wake_samples("dev1", 100)
-    assert len(rows) == samples.KEEP_PER_DEVICE
-    assert rows[0]["ts"] == samples.KEEP_PER_DEVICE + 2
+    assert len(rows) == 53
+    assert rows[0]["ts"] == 52
+    assert rows[-1]["ts"] == 0
 
 
-def test_retention_unlinks_audio_while_its_row_still_exists(fresh_db, monkeypatch):
+def test_insert_never_unlinks_existing_audio(fresh_db, monkeypatch):
     first = samples.filename("dev1")
     assert samples.save("dev1", first, _pcm())
     db.insert_wake_sample("dev1", {
         "ts": 0, "audio_file": first, "kind": "candidate",
     })
-    for i in range(1, samples.KEEP_PER_DEVICE):
+    calls = []
+    monkeypatch.setattr(samples, "unlink",
+                        lambda *a, **kw: calls.append(a) or True)
+    for i in range(1, 55):
         db.insert_wake_sample("dev1", {
             "ts": i, "audio_file": samples.filename("dev1"), "kind": "candidate",
         })
-
-    unlink = samples.unlink
-    observed = []
-
-    def check_then_unlink(device_id, name, db_path=None):
-        row = db._conn.execute(
-            "SELECT 1 FROM wake_samples WHERE device_id = ? AND audio_file = ?",
-            (device_id, name),
-        ).fetchone()
-        observed.append(row is not None)
-        return unlink(device_id, name, db_path)
-
-    monkeypatch.setattr(samples, "unlink", check_then_unlink)
-    db.insert_wake_sample("dev1", {
-        "ts": samples.KEEP_PER_DEVICE, "audio_file": samples.filename("dev1"),
-        "kind": "candidate",
-    })
-
-    assert observed == [True]
-    assert not samples.resolve("dev1", first)
-    assert len(db.get_wake_samples("dev1", 100)) == samples.KEEP_PER_DEVICE
-
-
-def test_retention_keeps_metadata_when_audio_cannot_be_unlinked(fresh_db, monkeypatch):
-    names = []
-    for i in range(samples.KEEP_PER_DEVICE):
-        name = samples.filename("dev1")
-        names.append(name)
-        db.insert_wake_sample("dev1", {
-            "ts": i, "audio_file": name, "kind": "candidate",
-        })
-    monkeypatch.setattr(samples, "unlink", lambda *_a, **_kw: False)
-
-    with pytest.raises(OSError, match="could not remove expired wake sample"):
-        db.insert_wake_sample("dev1", {
-            "ts": samples.KEEP_PER_DEVICE,
-            "audio_file": samples.filename("dev1"), "kind": "candidate",
-        })
-
-    rows = db.get_wake_samples("dev1", 100)
-    assert len(rows) == samples.KEEP_PER_DEVICE
-    assert {row["audio_file"] for row in rows} == set(names)
+    assert calls == []
+    assert samples.resolve("dev1", first)
+    assert len(db.get_wake_samples("dev1", 100)) == 55
 
 
 def test_delete_keeps_metadata_when_audio_cannot_be_unlinked(fresh_db, monkeypatch):
@@ -257,19 +224,19 @@ def test_labeling_archives_the_sample_with_its_metadata(fresh_db):
     assert meta["model"] == "hey_vanessa" and meta["score"] == .8
 
 
-def test_archive_survives_retention_pruning_of_the_original(fresh_db):
+def test_archive_and_original_survive_many_later_samples(fresh_db):
     name = samples.filename("dev1")
     assert samples.save("dev1", name, _pcm())
     row_id = db.insert_wake_sample("dev1", {"ts": 0, "audio_file": name, "kind": "candidate"})
     assert db.set_wake_sample_label("dev1", row_id, "not_wake")
     archived = samples.archive_dir("not_wake") / name
 
-    for i in range(1, samples.KEEP_PER_DEVICE + 2):
+    for i in range(1, 55):
         db.insert_wake_sample("dev1", {
             "ts": i, "audio_file": samples.filename("dev1"), "kind": "candidate",
         })
 
-    assert not samples.resolve("dev1", name)  # original pruned
+    assert samples.resolve("dev1", name)  # original kept — no pruning
     assert archived.is_file()  # archived copy untouched
 
 
