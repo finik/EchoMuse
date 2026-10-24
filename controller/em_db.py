@@ -62,6 +62,12 @@ DEFAULT_DEVICE_CONFIG = {
     # Wake training samples are opt-in; candidates and triggers are saved for admin review.
     "wakeClipCapture":  False,
     "wakeClipMinScore": 0.20,
+    # Capture floor for the second scorer (em_mww). Separate from
+    # wakeClipMinScore because the two engines score on different
+    # scales: 0.3 here sits against mww's 0.9 detection cutoff.
+    "mwwClipMinScore":  0.30,
+    # Record-only training capture: save candidates, never start a turn.
+    "wakeRecordOnly":   False,
     "adcDigitalGain":   88,
     "adcMicpga":        40,
     # micGainDb: fixed digital gain (dB) the device applies to the full
@@ -1168,6 +1174,22 @@ MIGRATIONS: list[str] = [
     ALTER TABLE device_boots ADD COLUMN prev_clean INTEGER;
 
     UPDATE system_config SET value = '33' WHERE key = 'schema_version';
+    """,
+
+    # ── v34 — the second scorer's verdict on the same clip ──────────────────
+    # microWakeWord's window average (em_mww) at the moment the clip was
+    # captured, NULL when that scorer was unavailable or had not yet filled
+    # its first window. Stored beside openWakeWord's score rather than in its
+    # own table because the question is always "what did the OTHER engine say
+    # about THIS audio" — the two scores are one observation.
+    #
+    # Capture is OR'd across both engines from this version on, so a row may
+    # exist with a LOW `score` and a high `mww_score`: that is a clip oww
+    # would never have saved, and the only reason this column is worth having.
+    """
+    ALTER TABLE wake_samples ADD COLUMN mww_score REAL;
+
+    UPDATE system_config SET value = '34' WHERE key = 'schema_version';
     """,
 ]
 
@@ -2836,34 +2858,23 @@ def get_wake_counters(device_id: str, since: float) -> list[sqlite3.Row]:
 
 
 def insert_wake_sample(device_id: str, rec: dict) -> int:
-    """Persist metadata for one already-written wake sample; prune by id."""
+    """Persist metadata for one already-written wake sample.
+
+    Deliberately uncapped: samples are wake-word training data, so nothing
+    is pruned here. A sample is removed only by an explicit delete.
+    """
     with _tx() as conn:
         cur = conn.execute(
             """INSERT INTO wake_samples
                (device_id, ts, audio_file, kind, label, model, score,
-                threshold, device_score, trigger_source)
-               VALUES (?, ?, ?, ?, 'unreviewed', ?, ?, ?, ?, ?)""",
+                threshold, device_score, trigger_source, mww_score)
+               VALUES (?, ?, ?, ?, 'unreviewed', ?, ?, ?, ?, ?, ?)""",
             (device_id, _py(rec["ts"]), rec["audio_file"], rec["kind"],
              rec.get("model"), _py(rec.get("score")), _py(rec.get("threshold")),
-             _py(rec.get("device_score")), rec.get("trigger_source")),
+             _py(rec.get("device_score")), rec.get("trigger_source"),
+             _py(rec.get("mww_score"))),
         )
         sample_id = cur.lastrowid
-        expired = conn.execute(
-            """SELECT id, audio_file FROM wake_samples WHERE device_id = ?
-               ORDER BY id DESC LIMIT -1 OFFSET ?""",
-            (device_id, em_wake_samples.KEEP_PER_DEVICE),
-        ).fetchall()
-        if expired:
-            # Unlink before deleting metadata. If the process stops during
-            # cleanup, the rows remain available to retry the removals.
-            for row in expired:
-                if not em_wake_samples.unlink(device_id, row["audio_file"]):
-                    raise OSError(
-                        f"could not remove expired wake sample "
-                        f"{row['audio_file']} for {device_id}"
-                    )
-            conn.executemany("DELETE FROM wake_samples WHERE id = ?",
-                             [(r["id"],) for r in expired])
     return sample_id
 
 

@@ -59,6 +59,8 @@ async def apply_live_config(device_id: str, live, effective: dict) -> None:
         live.wake_clip_capture = bool(effective["wakeClipCapture"])
         if not live.wake_clip_capture:
             live.wake_capture.reset()
+    if "wakeRecordOnly" in effective:
+        live.wake_record_only = bool(effective["wakeRecordOnly"])
     if "wakeClipMinScore" in effective:
         try:
             live.wake_clip_min_score = max(0.05, min(0.95, float(effective["wakeClipMinScore"])))

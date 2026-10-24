@@ -1,4 +1,4 @@
-"""Bounded wake-word candidate audio capture.
+"""Wake-word candidate audio capture, retained without a count cap.
 
 The controller already receives continuous 16 kHz mono mic frames for wake
 scoring. Keep only a short in-memory pre-roll, and write WAVs when a score
@@ -33,10 +33,10 @@ TRIGGER_POST_ROLL_SECONDS = 0
 TRIGGER_TAIL_TRIM_SECONDS = 0.2
 TRIGGER_TAIL_TRIM_BYTES = int(TRIGGER_TAIL_TRIM_SECONDS * SAMPLE_RATE * SAMPLE_WIDTH)
 MAX_CLIP_BYTES = 5 * SAMPLE_RATE * SAMPLE_WIDTH
-KEEP_PER_DEVICE = 50
 SUBDIR = "wake_samples"
-# Labeling a sample also copies it here, permanently and uncapped - the 50-per-device
-# cap above still applies to the reviewable copy, so a label is what survives it.
+# Labeling a sample also copies it here, permanently, one directory per label.
+# The reviewable copies in SUBDIR are likewise uncapped (training data must
+# never be silently pruned); only explicit deletion removes a sample.
 ARCHIVE_SUBDIR = "wake_samples_archive"
 ARCHIVE_LABELS = ("wake", "not_wake", "uncertain")
 _NAME_RE = re.compile(r"^(?P<device>[A-Za-z0-9_.-]{1,64})_(?P<token>[a-f0-9]{32})\.wav$")
@@ -168,21 +168,37 @@ class WakeCapture:
 
     def consider(self, *, enabled: bool, minimum: float, score: float,
                  threshold: float, model: str, device_score=None,
-                 trigger_source: str | None = None, now: float | None = None):
-        """Start/update a clip on a score candidate or any actual trigger."""
+                 trigger_source: str | None = None, now: float | None = None,
+                 mww_score=None, mww_minimum: float | None = None):
+        """Start/update a clip on a score candidate or any actual trigger.
+
+        The floor is the OR of both scorers, and that is deliberate. Gating
+        capture on openWakeWord alone is what made microWakeWord's own false
+        positives unmeasurable: a clip was written only when oww crossed, so
+        audio mww would fire on and oww ignored was never recorded, and the
+        absence read as a good result rather than as missing data. Either
+        engine crossing its own floor is now enough to save the clip.
+        """
         now = time.monotonic() if now is None else now
         triggered = bool(trigger_source)
         if not enabled:
             self.above_floor = False
             return
         score = None if score is None else float(score)
+        mww_score = None if mww_score is None else float(mww_score)
         candidate = score is not None and score >= minimum
+        if mww_score is not None and mww_minimum is not None:
+            candidate = candidate or mww_score >= mww_minimum
         rising_candidate = candidate and not self.above_floor
         self.above_floor = candidate
         if self.active is not None:
             if score is not None:
                 prior = self.active["score"]
                 self.active["score"] = score if prior is None else max(prior, score)
+            if mww_score is not None:
+                prior = self.active["mww_score"]
+                self.active["mww_score"] = (
+                    mww_score if prior is None else max(prior, mww_score))
             if device_score is not None:
                 prior = self.active["device_score"]
                 self.active["device_score"] = (
@@ -202,11 +218,16 @@ class WakeCapture:
                 "kind": kind,
                 "model": model, "score": score, "threshold": float(threshold),
                 "device_score": device_score, "trigger_source": trigger_source,
+                "mww_score": mww_score,
             }
             return
         active = self.active
         if score is not None:
             active["score"] = score if active["score"] is None else max(active["score"], score)
+        if mww_score is not None:
+            active["mww_score"] = (
+                mww_score if active["mww_score"] is None
+                else max(active["mww_score"], mww_score))
         if device_score is not None:
             active["device_score"] = max(active["device_score"] or 0.0, float(device_score))
         if triggered:
@@ -229,4 +250,5 @@ class WakeCapture:
             "model": active["model"], "score": active["score"],
             "threshold": active["threshold"], "device_score": active["device_score"],
             "trigger_source": active["trigger_source"], "ts": active["ts"],
+            "mww_score": active.get("mww_score"),
         }
