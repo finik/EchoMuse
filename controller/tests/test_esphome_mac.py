@@ -180,6 +180,9 @@ def test_migrations_are_append_only():
     # v33 is its own entry (prev_clean), not appended onto v32.
     assert "prev_clean" in db.MIGRATIONS[32]
     assert "prev_clean" not in db.MIGRATIONS[31]
+    # v34 likewise (wake_samples.mww_score).
+    assert "mww_score" in db.MIGRATIONS[33]
+    assert "mww_score" not in db.MIGRATIONS[32]
     # v30 is its own entry (emos_version, emos_build), not appended onto v29.
     assert "emos_version" in db.MIGRATIONS[29]
     assert "emos_version" not in db.MIGRATIONS[28]
