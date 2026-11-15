@@ -41,8 +41,10 @@ def _run_turns(monkeypatch, continues, wake_sound=True, capabilities=("wake_cue"
 
     answers = iter(continues)
 
-    async def trigger_voice_turn(**_kw):
-        return next(answers)
+    async def trigger_voice_turn(**kw):
+        # (should_continue, turn_ok, conversation_id) — the follow-up window
+        # carries the id forward so HA keeps short-term context across turns.
+        return next(answers), True, kw.get("conversation_id") or "cid"
 
     async def nothing(*_a, **_k):
         return None
