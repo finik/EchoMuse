@@ -107,7 +107,6 @@ import em_shadow
 import em_health
 import em_wake_samples
 import em_oww_warmup
-import em_mww
 import em_house_announce
 import em_barge
 import em_listen
@@ -589,17 +588,6 @@ class Device:
         # truncating the clip) on every utterance.
         self.wake_record_only: bool = False
         self.wake_capture: em_wake_samples.WakeCapture = em_wake_samples.WakeCapture()
-        # microWakeWord scored on the same stream (em_mww). A MEASUREMENT: it
-        # can widen what gets recorded, never what starts a turn. Built lazily
-        # per connection because its tflite interpreter and audio frontend are
-        # both streaming — one per device, never shared. None when the runtime
-        # or model files are absent, which costs nothing but the comparison.
-        self.mww = None
-        # Capture floor for that scorer, the counterpart of wakeClipMinScore.
-        # 0.3 against a 0.9 detection cutoff: low enough to catch mww's near
-        # misses, high enough not to flood, given mww's negatives sit at a
-        # median of 0.003 (measured over 1041 clips, 2026-10-18).
-        self.mww_clip_min_score: float = 0.30
         # streamReply: play a reply from HA's early streaming signal rather than
         # TTS_END (em_earlytts). Read per turn by em_esphome. Config key:
         # streamReply. Off by default.
@@ -3989,14 +3977,6 @@ async def _stream_listen(device: Device):
     # noise until the window has refilled. Un-warmed at construction to match
     # the model above; re-armed at every reset() below. See em_oww_warmup.
     warmup = em_oww_warmup.WarmupGate()
-    # Second scorer on the same stream, for the comparison only (em_mww).
-    # Built here rather than on the Device so it dies with the listener: its
-    # tflite variables and audio frontend are streaming state belonging to
-    # exactly this connection's audio.
-    if device.mww is None:
-        device.mww = em_mww.build()
-    elif device.mww is not None:
-        device.mww.reset()
     last_near_miss_log_ts = 0.0  # Q4: rate-limit near-miss INFO logging to 1/2s
     nm_pending = 0    # near-misses buffered since the last hourly-rollup flush
     nm_max     = 0.0  # highest buffered near-miss score
@@ -4251,23 +4231,6 @@ async def _stream_listen(device: Device):
                 # so the gate and the model stay in step.
                 trusted = warmup.feed()
 
-                # The other engine, on the identical chunk. Deliberately fed
-                # from here and nowhere else: the `device.speaking` skip above
-                # already returned, so both scorers see exactly the same audio
-                # with exactly the same gaps, which is what makes the two
-                # scores comparable at all. Never consulted for triggering.
-                mww_score = None
-                if device.mww is not None:
-                    try:
-                        mww_score = await loop.run_in_executor(
-                            None, device.mww.feed, samples
-                        )
-                    except Exception as exc:        # noqa: BLE001
-                        log.warning(
-                            f"[{device.device_id}] microWakeWord scoring failed, "
-                            f"disabling for this connection: {exc}")
-                        device.mww = None
-
                 # Log any score above noise floor so we can see near-misses
                 # and understand whether failed wakes are "close but below
                 # threshold" vs "not registering at all".
@@ -4375,8 +4338,6 @@ async def _stream_listen(device: Device):
                         model=current_model_name,
                         device_score=(dev_wake["score"] if dev_wake is not None else None),
                         trigger_source=(source if source != "none" else None),
-                        mww_score=mww_score,
-                        mww_minimum=device.mww_clip_min_score,
                     )
                 if ctrl_hit and device.oww_on_device == em_shadow.MODE_ON:
                     # "on" mode, and this controller heard it too. Recorded for
@@ -5746,7 +5707,6 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
             await device.push_config(wakeWordEnabled=device.wake_word_enabled)
         device.wake_clip_capture = bool(config.get("wakeClipCapture", False))
         device.wake_clip_min_score = float(config.get("wakeClipMinScore", 0.20))
-        device.mww_clip_min_score = float(config.get("mwwClipMinScore", 0.30))
         device.wake_record_only = bool(config.get("wakeRecordOnly", False))
         device.stream_reply = bool(config.get("streamReply", False))
         device.barge_in_enabled = bool(config.get("bargeInEnabled", False))
