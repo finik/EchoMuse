@@ -634,6 +634,64 @@ push and every connect.
 
 ## On-device wake word (shadow mode)
 
+- **2026-11-15, rescoring a corpus with `model.reset()` per clip inflates
+  false positives by an order of magnitude, and nothing on a device does it.**
+  `AudioFeatures.reset()` does not start empty: it sets
+  `melspectrogram_buffer` to `np.ones((76,32))` and fills `feature_buffer`
+  with embeddings of FOUR SECONDS OF RANDOM NOISE. Streaming a clip after a
+  reset therefore emits ~9 leading rows computed from that padding mixed with
+  partial audio, and since the classifier window is 16 rows, the first ~25
+  scores of every clip are contaminated. A per-clip max over them counts
+  phantom detections. Measured on our 4,327 negatives: **1,537 clips scored
+  above 0.5 streamed-with-reset, against 234 on clean whole-clip features**,
+  and stock's apparent false fires at its live threshold went from 192 to 14.
+  It also made `owwMinFrames` look valuable — N=3 beat N=1 on the contaminated
+  scores and loses to it on clean ones, because what N was suppressing was the
+  artifact, not real false fires. A device never resets per clip: openWakeWord
+  runs continuously there and its window always holds real room audio. Offline
+  evaluation must use whole-clip features, or prime with real audio and
+  discard the first 25 frames.
+
+- **2026-11-15, `embed_clips` and the streaming path sample windows 4 mel
+  frames apart, permanently.** The streaming melspectrogram buffer is
+  pre-padded with 76 rows and the embedding step is 8, and 76 mod 8 = 4, so
+  streaming's windows land on real-row offsets 4, 12, 20… where whole-clip
+  windows land on 0, 8, 16… They never align. The melspectrograms themselves
+  agree to 3e-6, so this is windowing phase and not a numerical fault, and
+  neither phase is more correct — a continuous stream's phase is arbitrary
+  anyway. It does mean scores from the two paths cannot be compared frame by
+  frame, which is what sent us looking for a bug that was not there.
+
+- **2026-11-15, a logit-averaged ensemble of N heads IS a single wider head,
+  so an ensemble needs no new ONNX operators.** Three independent
+  1536→256→256→1 stacks are one 1536→768→768→1 stack with block-diagonal
+  first and second layers, and the averaging folds into the last layer's
+  weights (divided by N) and bias (meaned). ReLU is elementwise so it commutes
+  with the block structure, and the members never mix until the final sum.
+  Verified identical on 4,505 clips (max diff 2.4e-07, decisions agree 100% at
+  every threshold tried) and FASTER than three separate stacks — 71.8us/frame
+  against 139 on x86, one large GEMM beating three small ones. Cost is
+  density: the block-diagonal second layer stores 2/3 zeros, so the file grew
+  5.5MB → 7.1MB. Worth it to keep the graph op-for-op identical to stock,
+  which is what makes an Echo's armv7 ORT a non-question.
+
+- **2026-11-15, the classifier is ~2% of the wake pipeline's cost, so its size
+  barely matters.** Per 80ms frame, one thread, x86: melspectrogram 116us,
+  Google speech embedding **1452us**, stock classifier 33us. Replacing the
+  classifier with one 8x its parameters (213k → 1.77M) raised the whole
+  pipeline 9.4%. Confirmed on biscuit G090LF09640606E9 with `tools/oww_probe`
+  at the real 12.5Hz duty cycle: **39.2% of a core with stock, 41.0% with
+  ours**, p50 latency 29.8ms → 31.6ms against the 80ms slot, 0 of 250 frames
+  overran, peak RSS 22MB → 35MB. Budget for a bigger HEAD freely; the
+  embedding model is where the cost is.
+
+- **2026-11-15, `oww_probe` fails against any classifier the fixture was not
+  generated with, and that is not a hardware fault.** `ort_fixture.bin` ships
+  with golden scores from `hey_mycroft_v0.1`, so running the probe with a
+  different classifier fails its score stage by construction while melspec and
+  embedding pass — which reads exactly like a broken device. Regenerate first:
+  `EM_CLASSIFIER=<model>.onnx python3 gen_ort_fixture.py out.bin`.
+
 The Echo can run the wake model itself. `owwOnDevice` = `off` (default),
 `shadow` or `on`; an unknown value normalises to `off` at BOTH ends rather than
 being guessed at — the two plausible guesses are "score silently" and "start
