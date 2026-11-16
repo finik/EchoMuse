@@ -1249,6 +1249,10 @@ func applyHardwareConfig(msg config.ConfigMessage) {
 	// board half of these writes fail, and the gain path swallows that
 	// silently — a mic gain that appears to apply and does not.
 	adcs := board.CurrentLayout().Mics.ADCs
+	if len(adcs) == 0 {
+		// Every board that predates MicArray.ADCs has the AIC32x4's four.
+		adcs = []string{"A", "B", "C", "D"}
+	}
 	if msg.AdcDigitalGain != nil {
 		g := strconv.Itoa(*msg.AdcDigitalGain)
 		for _, adc := range adcs {

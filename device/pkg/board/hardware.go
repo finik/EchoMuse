@@ -216,6 +216,14 @@ type MicArray struct {
 	// EchoRef is a channel carrying the device's own playback in the same
 	// frame as the microphones, -1 when there is none.
 	EchoRef int
+	// ADCs names the codec's own analogue-to-digital converters, as the
+	// mixer spells them in "ADC_<name> ...". The gain controls are written
+	// over THESE, never a fixed A..D: the AIC3101 on a Spot has two where
+	// the AIC32x4 has four, so half of a fixed set's writes fail — and the
+	// gain path reports that only to the log, leaving a mic gain that looks
+	// applied and is not. Empty means A..D, which is every board that had
+	// one before this field existed.
+	ADCs []string
 }
 
 // Mic is a microphone's channel and its angle.
@@ -594,6 +602,7 @@ var rookMics = MicArray{
 	Perimeter: []Mic{
 		{Ch: 2, Angle: 180}, {Ch: 3, Angle: 270}, {Ch: 0, Angle: 0}, {Ch: 1, Angle: 90},
 	},
+	ADCs:    rookADCs,
 	Centre:  -1,
 	EchoRef: 5,
 }
@@ -606,6 +615,9 @@ var rookMicMutes = []string{
 	"ADC_A Left Mute", "ADC_A Right Mute",
 	"ADC_B Left Mute", "ADC_B Right Mute",
 }
+
+// rookADCs: the same two converters the mute list names, for the gain writes.
+var rookADCs = []string{"A", "B"}
 
 // rookRoutes: the AIC3101 has two ADCs, so only A and B are closed. Writing
 // C and D is harmless to the audio and makes a healthy boot log "2 of 10
