@@ -44,7 +44,17 @@ def _run_turns(monkeypatch, continues, wake_sound=True, capabilities=("wake_cue"
     async def trigger_voice_turn(**kw):
         # (should_continue, turn_ok, conversation_id) — the follow-up window
         # carries the id forward so HA keeps short-term context across turns.
-        return next(answers), True, kw.get("conversation_id") or "cid"
+        # `continues` describes HA's answers only. The post-turn loop asks
+        # for one more turn than that: once HA stops continuing, the
+        # follow-up window opens on its own (the `elif turn_ok` branch) and
+        # listens. A real one ends when nobody speaks into it, so that is
+        # what the end of `continues` means here -- turn_ok False, closing
+        # the loop. The old bare next() raised StopIteration into a
+        # coroutine, which asyncio reports as an unrelated RuntimeError.
+        nxt = next(answers, None)
+        if nxt is None:
+            return False, False, kw.get("conversation_id") or "cid"
+        return nxt, True, kw.get("conversation_id") or "cid"
 
     async def nothing(*_a, **_k):
         return None
