@@ -49,6 +49,49 @@ type Hardware struct {
 	Loopback     PCM
 	LoopbackRate int
 	LoopbackChs  int
+	// MuteKey is the evdev code the board's mic-off button reports, 0 where
+	// it is the ordinary KEY_MUTE. The Spot has no mute key at all: its
+	// mic-off button is wired to KEY_POWER, so a firmware that only knows
+	// 113 never sees a mute and the ring never turns red, while Amazon's
+	// own privacy driver toggles underneath — the two then disagree and
+	// reconcilePrivacy pulls them back to muted. Held as data because the
+	// code is the board's, not the driver's.
+	MuteKey uint16
+
+	// ScreenWakeFile is touched on every button press with the time day
+	// brightness should hold until, for boards whose screen dims itself.
+	// The Spot's night dim is a root script reading this path (the panel
+	// writes the same file on a tap); a button press is just as much an
+	// interaction as a tap, and a device that stays dark when you press it
+	// reads as broken. "" where the board has no screen to wake.
+	ScreenWakeFile string
+	// ScreenWakeMs is how long that hold lasts, matching the panel's tap.
+	ScreenWakeMs int64
+	// ScreenBacklight is the sysfs brightness the wake writes DIRECTLY, so
+	// the screen is lit by the time the person has finished speaking. The
+	// hold file alone is not enough: the dim script polls it every two
+	// seconds, so a wake word left the Spot dark for up to that long, which
+	// is the delay it was meant to remove. This does not race the script —
+	// the hold goes down first, so the script's next pass agrees.
+	// "" where the board has no backlight to write.
+	ScreenBacklight string
+	// ScreenDayBrightness is what to write there: the script's own DAY.
+	ScreenDayBrightness int
+
+	// GrabInputs takes the Keys devices exclusively (EVIOCGRAB), so Android
+	// does not also act on the presses. Reading an evdev node does not
+	// consume its events — every reader gets a copy — so without this the
+	// Spot's action button reaches Android as the power key and raises the
+	// keyguard over the panel (a black screen over the clock face), and the
+	// volume keys raise Android's own slider on top of the codec level
+	// EchoMuse is setting. Needed wherever an Android UI runs above us.
+	//
+	// Off by default: taking an input device exclusively is not a change to
+	// make untested on a board whose shipped behaviour has always been to
+	// share. A grab failure is logged and tolerated — the buttons still
+	// work, Android just sees them too.
+	GrabInputs bool
+
 	// MicMutes are the switches that silence the microphones in hardware,
 	// written "1" on mute and "0" on unmute beside stopping the stream.
 	MicMutes []string
@@ -423,9 +466,17 @@ type Layout struct {
 	RingLED0 float64
 	// MuteLEDGPIO is "" when the board has no mute LED GPIO to drive.
 	MuteLEDGPIO string
-	Capture     *PCMAddr // nil when not found
-	Playback    *PCMAddr
-	Mics        MicArray
+	// GrabInputs is the board's; see Hardware.
+	GrabInputs bool
+	// MuteKey, ScreenWakeFile and ScreenWakeMs are the board's; see Hardware.
+	MuteKey             uint16
+	ScreenWakeFile      string
+	ScreenWakeMs        int64
+	ScreenBacklight     string
+	ScreenDayBrightness int
+	Capture             *PCMAddr // nil when not found
+	Playback            *PCMAddr
+	Mics                MicArray
 	// Loopback is nil when the board has none or it was not found;
 	// LoopbackRate and LoopbackChs are the board's.
 	Loopback                  *PCMAddr
@@ -458,7 +509,11 @@ func Resolve(root string, b *Board) *Layout {
 		hw = b.Hardware
 	}
 	l := &Layout{Board: b, MuteLEDGPIO: hw.MuteLEDGPIO, LightSensors: hw.LightSensors,
-		HCI: hw.HCI, HCIPollRead: hw.HCIPollRead,
+		GrabInputs: hw.GrabInputs, MuteKey: hw.MuteKey,
+		ScreenWakeFile: hw.ScreenWakeFile, ScreenWakeMs: hw.ScreenWakeMs,
+		ScreenBacklight:     hw.ScreenBacklight,
+		ScreenDayBrightness: hw.ScreenDayBrightness,
+		HCI:                 hw.HCI, HCIPollRead: hw.HCIPollRead,
 		Routes: hw.Routes, InputGains: hw.InputGains, Speaker: hw.Speaker}
 	note := func(part, want, got string, err error) {
 		var line string
@@ -655,12 +710,27 @@ var rookHardware = &Hardware{
 	// This said "no LED" until 2026-10-04, read off the device tree's "LEDs:
 	// none besides the backlight" rather than off a device; the lit red
 	// button on a muted unit is what disproved it.
-	Capture:    PCM{Name: "TLV320AIC3101 Capture", Fallback: &PCMAddr{0, 24}},
-	Playback:   PCM{Name: "TLV320AIC3204 Playback", Fallback: &PCMAddr{0, 23}},
-	Mics:       rookMics,
-	MicMutes:   rookMicMutes,
-	Routes:     rookRoutes,
-	InputGains: rookInputGains,
+	Capture:  PCM{Name: "TLV320AIC3101 Capture", Fallback: &PCMAddr{0, 24}},
+	Playback: PCM{Name: "TLV320AIC3204 Playback", Fallback: &PCMAddr{0, 23}},
+	Mics:     rookMics,
+	MicMutes: rookMicMutes,
+	// The Spot runs the panel APK on a live Android, so every press Android
+	// also sees acts twice: the action button is KEY_POWER on this board and
+	// raises the keyguard over the panel. Taken exclusively here.
+	GrabInputs: true,
+	// There is no KEY_MUTE on this board; the mic-off button is KEY_POWER.
+	MuteKey: 116,
+	// The night dim is a root script (scripts/03-rook-backlight.sh) reading
+	// this file; the panel writes it on a tap and a button press means the
+	// same thing. 20s matches the panel's TAP_HOLD_MS.
+	ScreenWakeFile: "/data/data/com.echomuse.rookpanel/files/bright_until",
+	ScreenWakeMs:   20_000,
+	// Must stay DAY in scripts/03-rook-backlight.sh; the two write the same
+	// node and a mismatch would flicker between them.
+	ScreenBacklight:     "/sys/class/leds/lcd-backlight/brightness",
+	ScreenDayBrightness: 249,
+	Routes:              rookRoutes,
+	InputGains:          rookInputGains,
 	// No /dev/stpbt. rook's Broadcom BCM43569 speaks H4 over UART, so the
 	// node MediaTek's combo chip exposes is simply not there and the BLE
 	// proxy cannot run.

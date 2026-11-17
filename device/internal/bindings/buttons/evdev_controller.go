@@ -3,6 +3,7 @@ package buttons
 import (
 	"context"
 	"errors"
+	"log"
 	"os/exec"
 	"time"
 
@@ -47,6 +48,12 @@ func (e *EvDevController) Init() error {
 	return nil
 }
 
+// muteHoldCutoffMs separates a mute press from a hold on a board where one
+// button is both. Below client.PairHoldDuration (7s) by a wide margin, so a
+// hold meant for pairing is never eaten as a mute, and above any press a
+// person makes meaning "mute".
+const muteHoldCutoffMs = 1000
+
 func (e *EvDevController) SubscribeToButton(callback buttons.ButtonClickCallback) (*buttons.EventSubscription, error) {
 	if callback == nil {
 		return nil, errors.New("callback can't be nil")
@@ -70,6 +77,27 @@ func (e *EvDevController) SubscribeToButton(callback buttons.ButtonClickCallback
 		devices = append(devices, d)
 	}
 
+	// EVIOCGRAB where the board asks for it. Reading an evdev node does not
+	// consume its events, so without this Android acts on the same presses:
+	// on the Spot the action button arrives as KEY_POWER and raises the
+	// keyguard over the panel, and the volume keys raise Android's slider.
+	// Tolerated on failure — the buttons still work, Android just sees them.
+	muteKey := buttons.MuteClick
+	if k := board.CurrentLayout().MuteKey; k != 0 {
+		muteKey = buttons.ClickType(k)
+	}
+
+	if board.CurrentLayout().GrabInputs {
+		for i, d := range devices {
+			if err := d.Grab(); err != nil {
+				log.Printf("[buttons] could not grab %s exclusively (%v) — "+
+					"Android will also see these keys", keys[i], err)
+			} else {
+				log.Printf("[buttons] grabbed %s exclusively", keys[i])
+			}
+		}
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	eventSub := buttons.NewEventSubscription(cancel)
 
@@ -91,17 +119,42 @@ func (e *EvDevController) SubscribeToButton(callback buttons.ButtonClickCallback
 				continue
 			}
 			if isVolume(k.Code) {
+				// Volume is an interaction like any other press, and this
+				// branch returns before the WakeScreen below ever runs — so
+				// turning the volume up on a dimmed Spot left it dark, which
+				// is the one thing the wake is here to prevent.
+				if k.Down {
+					board.WakeScreen()
+				}
 				if !k.Down && e.volumeCallback != nil {
 					e.volumeCallback(map[buttons.ClickType]string{
 						buttons.VolumeUpClick: "up", buttons.VolumeDownClick: "down"}[k.Code])
 				}
 				continue
 			}
-			if k.Code == buttons.MuteClick {
-				if !k.Down && e.muteCallback != nil {
-					e.muteCallback()
+			// Any press is an interaction, so wake a screen that dims
+			// itself — a device that stays dark when you press it reads
+			// as broken. Best effort: a failed write must never cost a
+			// button press.
+			if k.Down {
+				board.WakeScreen()
+			}
+			// The board says which code its mic-off button reports.
+			// A SHORT press of it is the mute; a long one still reaches
+			// the action path, because on a board whose only button is
+			// this one that hold is how pairing is asked for.
+			if k.Code == muteKey {
+				if !k.Down && k.HeldMs < muteHoldCutoffMs {
+					if e.muteCallback != nil {
+						e.muteCallback()
+					}
+					continue
 				}
-				continue
+				if !k.Down {
+					// long: fall through as the action button
+				} else {
+					continue
+				}
 			}
 			callback(buttons.ButtonClickEvent{
 				Button:    e.GetDotButton(),

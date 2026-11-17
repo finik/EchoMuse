@@ -1489,6 +1489,11 @@ func onWakeCrossing(cc *client.ControlClient, dc *client.DataClient,
 	spk *speaker.PcmSpeaker, srv *server.Server,
 	score, crossed float32, at time.Time) {
 	ageMs := time.Since(at).Milliseconds()
+	// Being spoken to is interaction: wake a screen that dims itself, the
+	// same as a button press or a tap on the panel. Before the crossing is
+	// filtered below, because a muted or wake-word-off device that heard you
+	// should still light up — it is about to tell you why it is not acting.
+	board.WakeScreen()
 	if config.Get().Snapshot().OwwOnDevice != config.OnDeviceOn {
 		cc.SendOwwShadowCross(score, ageMs)
 		return
