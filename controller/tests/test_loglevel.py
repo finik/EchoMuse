@@ -246,7 +246,12 @@ def test_every_logger_the_controller_defines_is_reachable():
     # Third-party loggers the controller deliberately quiets. These are not
     # ours and have no echomuse parent to inherit from; they are named here
     # because they are, deliberately, set individually.
-    third_party = {"websockets.server", "aiohttp.access"}
+    # "websockets" is the whole library, not one child: a Muse voice call is
+    # a websocket CLIENT, and that library logs the Authorization header at
+    # DEBUG, so em_muselink silences the parent whatever the controller's
+    # level is. Quieting only .server would leave a credentialed call able to
+    # print its own token.
+    third_party = {"websockets", "websockets.server", "aiohttp.access"}
 
     offenders = []
     for path in sorted(CONTROLLER.glob("*.py")):

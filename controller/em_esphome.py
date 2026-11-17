@@ -96,6 +96,8 @@ import em_player
 import em_tasks
 import em_timers
 import em_house_announce
+import em_musecall
+import em_muselink
 import em_tts_audio
 import em_turn_record
 import em_turnclock
@@ -414,6 +416,8 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         # once per turn, since on a slow turn both routes fire.
         self._thinking_entered  = False
         self._on_stt_end        = None   # async callable(text: str)
+        self._muse_call         = False  # this turn was handed to Muse
+        self._muse_call_cb      = None   # async callable(device) -> str
         self._on_announce       = None   # async callable(pcm_bytes) — set only during an active voice turn (run_esphome_voice_turn); None otherwise. The standalone-announce path (setup wizard, push TTS) does NOT use this — it reads self._owning_server._standalone_play live at call time instead, since that value can legitimately change after this satellite was constructed (see _announce_play_cb).
 
     # ── Message handling ─────────────────────────────────────────────────
@@ -983,6 +987,17 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 if dev is not None:
                     dev.house_announce_clip = True
                 log.info(f"[{self._log_name}] House announce with message")
+            elif self._muse_call_cb is not None and em_musecall.is_handover(text):
+                # "call Muse". The listener asked for Muse directly, so Home
+                # Assistant's answer is not wanted and its run is stopped
+                # here rather than left to finish into a discarded reply.
+                # _tts_event is set because nothing will deliver one: the
+                # wait below would otherwise sit out its whole timeout
+                # before reaching the branch that starts the call.
+                self._muse_call = True
+                self.abort_ha_run()
+                self._tts_event.set()
+                log.info(f"[{self._log_name}] Handing this turn to Muse")
             if self._on_stt_end and not self._turn_cancelled:
                 em_tasks.spawn(self._on_stt_end(text))
 
@@ -1296,6 +1311,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         device,            # em_controller.Device — avoids circular import
         on_thinking,       # async callable()
         post_turn_play,    # async callable(pcm_chunks) -> decoded byte count
+        muse_call=None,    # async callable(device) -> str, or None if unpaired
         trace: "em_turn_record.TurnTrace | None" = None,
         preroll_discard: int = VOICE_PREROLL_DISCARD,
         wake_word_phrase: str = "",
@@ -1343,6 +1359,8 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         self._turn_cancelled        = False
         self._turn_end_reason       = None
         self._house_announce        = False
+        self._muse_call             = False
+        self._muse_call_cb          = muse_call
         self._tts_event.clear()
         self._tts_audio_url         = None
         self._tts_audio_data        = None
@@ -1490,6 +1508,16 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 why = self._turn_end_reason or "cancelled"
                 log.info(f"[{self._log_name}] Turn {why} while waiting for TTS")
                 if trace: trace.outcome = why
+                return
+
+            if self._muse_call:
+                # The microphone and speaker belong to Muse until the call
+                # ends. Home Assistant has already been aborted; this turn
+                # stays open so that the device keeps its wake suppression
+                # and the speaker for the whole conversation.
+                reason = await self._muse_call_cb(self._turn_device)
+                log.info(f"[{self._log_name}] Muse call ended: {reason}")
+                if trace: trace.outcome = "muse_call"
                 return
 
             if self._house_announce:
@@ -2692,6 +2720,7 @@ async def trigger_voice_turn(
     device,           # em_controller.Device
     on_thinking,      # async callable() — LED/state transition
     post_turn_play,   # async callable(pcm_chunks) -> decoded byte count
+    muse_call=None,   # async callable(device) -> str; None disables handover
     trigger_label: str = "unknown",  # "wakeword(0.522)" or "button" for trace
     preroll_discard: int = VOICE_PREROLL_DISCARD,
     conversation_id: str | None = None,
@@ -2775,11 +2804,18 @@ async def trigger_voice_turn(
         if trigger_label.startswith("wakeword") else ""
     )
 
+    # Offered only when the SDK and a pairing are both present; otherwise
+    # "call Muse" stays an ordinary Home Assistant turn (em_muselink.available).
+    unavailable = em_muselink.available()
+    if unavailable:
+        log.debug(f"[{device.device_id}] Muse calls unavailable: {unavailable}")
+
     await satellite.run_esphome_voice_turn(
         device=device,
         preroll_discard=preroll_discard,
         on_thinking=on_thinking,
         post_turn_play=post_turn_play,
+        muse_call=None if unavailable else muse_call,
         trace=trace,
         wake_word_phrase=wake_word_phrase,
         conversation_id=conversation_id,

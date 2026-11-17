@@ -129,6 +129,8 @@ COPY em_auth.py .
 COPY em_eq.py .
 COPY em_limiter.py .
 COPY em_mbc.py .
+COPY em_musecall.py .
+COPY em_muselink.py .
 COPY em_output_mute.py .
 COPY em_scenes.py .
 COPY em_support.py .

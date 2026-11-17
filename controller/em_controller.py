@@ -110,6 +110,7 @@ import em_oww_warmup
 import em_house_announce
 import em_barge
 import em_listen
+import em_muselink
 import em_ble_gatt
 import em_wakelevel
 import em_button
@@ -2720,6 +2721,40 @@ async def _meter_at_playback_start(pcm_chunks, on_start):
         await on_start()
 
 
+async def _run_muse_call(device: Device) -> str:
+    """Hold a speech-to-speech call with Muse on this device, and say why it ended.
+
+    Entered from the voice turn, once the transcript asked for Muse and Home
+    Assistant's run has been aborted. The turn still holds `voice_lock` and
+    `oww_paused`, so the wake word stays suppressed and nothing else can take
+    the speaker for the length of the call.
+
+    The device ends its microphone stream at every end of speech; `rearm_microphone`
+    opens the next one, so the conversation outlives any single stream.
+    """
+    audio = em_muselink.EchoCallAudio(device.voice_queue)
+    playback = asyncio.create_task(
+        _run_streaming_post_turn_playback(device, audio.playback()))
+    rearm = asyncio.create_task(
+        em_muselink.rearm_microphone(audio, device.mic_start_turn))
+    try:
+        return await em_muselink.place_call(audio)
+    except Exception as exc:
+        log.error(f"[{device.device_id}] Muse call failed: {exc}")
+        return f"failed: {exc}"
+    finally:
+        # Closing ends audio.playback(), which lets the speaker stream finish
+        # and send the device its EOS. Without that the device's barge flush
+        # would stay armed and swallow the next turn's audio.
+        audio.close()
+        rearm.cancel()
+        try:
+            await asyncio.wait_for(asyncio.shield(playback), 10)
+        except (asyncio.TimeoutError, Exception):
+            playback.cancel()
+        await asyncio.gather(rearm, playback, return_exceptions=True)
+
+
 async def _run_streaming_post_turn_playback(device: Device, pcm_chunks) -> int:
     """
     Play decoded HA TTS while the HTTP response is still arriving.
@@ -3243,6 +3278,7 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown",
                         device=device,
                         on_thinking=on_thinking_esphome,
                         post_turn_play=post_turn_play_esphome,
+                        muse_call=_run_muse_call,
                         trigger_label=turn_label,
                         preroll_discard=preroll_discard,
                         conversation_id=conversation_id,
