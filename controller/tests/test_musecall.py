@@ -156,3 +156,28 @@ def test_phrase_matching_does_not_drag_in_scipy():
                          text=True, cwd=controller, timeout=120)
     assert out.returncode == 0, out.stderr[-2000:]
     assert out.stdout.strip() == "", f"imported at module level: {out.stdout.strip()}"
+
+
+class TestTruncatedAndPrefixed:
+    """Speech-to-text does not hand over a clean phrase. "call Jarvis" came
+    back as "Call." on 2026-11-17 — the handover missed, and the fragment
+    reached the conversation agent, which said "Unable to get response" out
+    loud and woke the Echo next to it."""
+
+    @pytest.mark.parametrize("said", [
+        "Call.", "call", "Alexa call", "Alexa, call Jarvis.",
+        "alexa call muse", "Alexa talk to Muse",
+    ])
+    def test_reaches_muse(self, said):
+        assert em_musecall.is_handover(said, "alexa")
+
+    @pytest.mark.parametrize("said", [
+        "call mum", "call the office", "recall", "called",
+        "Alexa turn on the lights", "",
+    ])
+    def test_is_left_to_home_assistant(self, said):
+        assert not em_musecall.is_handover(said, "alexa")
+
+    def test_the_wake_word_goes_only_once(self):
+        """"Alexa, call Alexa" keeps the second one, so it is not a handover."""
+        assert not em_musecall.is_handover("Alexa call Alexa", "alexa")

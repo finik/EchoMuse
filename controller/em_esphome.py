@@ -96,6 +96,7 @@ import em_player
 import em_tasks
 import em_timers
 import em_house_announce
+import em_blankturn
 import em_musecall
 import em_muselink
 import em_tts_audio
@@ -417,6 +418,8 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         self._thinking_entered  = False
         self._on_stt_end        = None   # async callable(text: str)
         self._muse_call         = False  # this turn was handed to Muse
+        self._nothing_said      = False  # transcript held no request at all
+        self._wake_word_phrase  = ""     # what woke it, for the blank check
         self._muse_call_cb      = None   # async callable(device) -> str
         self._on_announce       = None   # async callable(pcm_bytes) — set only during an active voice turn (run_esphome_voice_turn); None otherwise. The standalone-announce path (setup wizard, push TTS) does NOT use this — it reads self._owning_server._standalone_play live at call time instead, since that value can legitimately change after this satellite was constructed (see _announce_play_cb).
 
@@ -987,7 +990,17 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 if dev is not None:
                     dev.house_announce_clip = True
                 log.info(f"[{self._log_name}] House announce with message")
-            elif self._muse_call_cb is not None and em_musecall.is_handover(text):
+            elif em_blankturn.is_blank(text, self._wake_word_phrase):
+                # Nothing was asked. The conversation agent answers a bare
+                # wake word with a spoken failure ("Unable to get response"),
+                # which the next Echo in earshot hears as its own wake word —
+                # eight turns of two Echoes answering each other, 2026-11-17.
+                # A turn that asked nothing ends quietly instead.
+                self._nothing_said = True
+                self.abort_ha_run()
+                self._tts_event.set()
+                log.info(f"[{self._log_name}] Nothing was said ({text!r}) — ending quietly")
+            elif self._muse_call_cb is not None and em_musecall.is_handover(text, self._wake_word_phrase):
                 # "call Muse". The listener asked for Muse directly, so Home
                 # Assistant's answer is not wanted and its run is stopped
                 # here rather than left to finish into a discarded reply.
@@ -1002,6 +1015,10 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 em_tasks.spawn(self._on_stt_end(text))
 
         elif event_type == ET.VOICE_ASSISTANT_INTENT_END:
+            # Temporary: find out whether HA names the agent's reply here, so
+            # a spoken failure ("Unable to get response") can be recognised
+            # and suppressed rather than played at the room.
+            log.info(f"[{self._log_name}] INTENT_END data: {dict(data)}")
             # Reliable "STT + intent resolution genuinely finished" marker —
             # always arrives after STT_END, always before TTS_START/RUN_END
             # in a normal turn. Used to tell a real terminal RUN_END apart
@@ -1361,6 +1378,8 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         self._house_announce        = False
         self._muse_call             = False
         self._muse_call_cb          = muse_call
+        self._nothing_said          = False
+        self._wake_word_phrase      = wake_word_phrase
         self._tts_event.clear()
         self._tts_audio_url         = None
         self._tts_audio_data        = None
@@ -1508,6 +1527,10 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 why = self._turn_end_reason or "cancelled"
                 log.info(f"[{self._log_name}] Turn {why} while waiting for TTS")
                 if trace: trace.outcome = why
+                return
+
+            if self._nothing_said:
+                if trace: trace.outcome = "nothing_said"
                 return
 
             if self._muse_call:

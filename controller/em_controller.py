@@ -2733,10 +2733,65 @@ async def _run_muse_call(device: Device) -> str:
     opens the next one, so the conversation outlives any single stream.
     """
     audio = em_muselink.EchoCallAudio(device.voice_queue)
+
+    # The ring says the call is on, for as long as it is on. A voice turn's
+    # ring is armed by the caller wrapping its PCM source; this path streams
+    # straight to the speaker, so without this the thinking spinner from the
+    # handover just sits there until its own 135s dead-man clears it, and
+    # there is no way to tell a live call from a finished one.
+    #
+    # The meter throbs with Muse's voice, so it reads as "Muse is talking";
+    # between answers it rests at the listening colour, which reads as "your
+    # turn". Both carry a dead-man TTL refreshed from here, because a call
+    # outlives any fixed one and a controller that dies mid-call must still
+    # let the device clear its own ring.
+    # Purple, and only ever purple, so a call is unmistakable: no other ring
+    # in the system uses it, and "is Muse still on?" should not need working
+    # out from a colour that also means listening to Home Assistant.
+    purple = [160, 0, 255]
+    speaking = dict(device.led_scene["meter_anim"])
+    speaking["colors"] = [purple]
+    speaking["ttlSec"] = em_scenes.meter_ttl(0.0)
+    waiting = dict(device.led_scene["listening_anim"])
+    waiting["colors"] = [purple] * em_scenes.NUM_LEDS
+    waiting["ttlSec"] = speaking["ttlSec"]
+
+    async def _ring() -> None:
+        # Starts at 0, not -1. At -1 the first pass read "Muse is talking"
+        # and sent the meter, which renders nothing while nothing is playing:
+        # the ring stayed dark until Muse's first word, so there was no sign
+        # the call was live and nothing told the listener to start talking.
+        # They waited for the light; the light waited for them (2026-11-17).
+        seen = 0
+        # Solid purple immediately, before anything else can take a turn.
+        await device.send_led_anim(waiting)
+        while True:
+            # More audio queued since the last look means Muse is talking.
+            talking = audio.played_frames != seen
+            seen = audio.played_frames
+            # Sent every pass, not only on a change: the same message is both
+            # the state and the dead-man refresh.
+            await device.send_led_anim(speaking if talking else waiting)
+            await asyncio.sleep(max(1.0, speaking["ttlSec"] / 3))
+
+    async def _watch() -> None:
+        """Where the microphone audio is going, while a call says it gets none."""
+        while True:
+            log.info(
+                "[%s] call state: oww_paused=%s voice_q=%d mic_q=%d "
+                "mic_gated=%s speaking=%s mic_frames=%d",
+                device.device_id, device.oww_paused.is_set(),
+                device.voice_queue.qsize(), device.mic_queue.qsize(),
+                getattr(device, "mic_gated", "?"),
+                getattr(device, "speaking", "?"), audio.mic_frames)
+            await asyncio.sleep(3)
+
     playback = asyncio.create_task(
         _run_streaming_post_turn_playback(device, audio.playback()))
     rearm = asyncio.create_task(
         em_muselink.rearm_microphone(audio, device.mic_start_turn))
+    ring = asyncio.create_task(_ring())
+    watch = asyncio.create_task(_watch())
     try:
         return await em_muselink.place_call(audio)
     except Exception as exc:
@@ -2748,11 +2803,15 @@ async def _run_muse_call(device: Device) -> str:
         # would stay armed and swallow the next turn's audio.
         audio.close()
         rearm.cancel()
+        ring.cancel()
+        watch.cancel()
         try:
             await asyncio.wait_for(asyncio.shield(playback), 10)
         except (asyncio.TimeoutError, Exception):
             playback.cancel()
-        await asyncio.gather(rearm, playback, return_exceptions=True)
+        await asyncio.gather(rearm, playback, ring, watch, return_exceptions=True)
+        # Hand the ring back: the turn's own end cue paints over this.
+        await device.send_led_anim(dict(device.led_scene["done_anim"]))
 
 
 async def _run_streaming_post_turn_playback(device: Device, pcm_chunks) -> int:

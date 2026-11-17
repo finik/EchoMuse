@@ -100,3 +100,32 @@ def test_a_house_announcement_still_wins():
     assert s._house_announce
     assert not s._muse_call
     assert s.aborts == 0
+
+
+def test_a_bare_wake_word_is_never_answered_out_loud():
+    """The conversation agent answers "Alexa." with a spoken failure, which
+    wakes the next Echo in earshot. The turn ends quietly instead."""
+    s = satellite()
+    s._wake_word_phrase = "alexa"
+    speak(s, "Alexa.")
+    assert s._nothing_said
+    assert s.aborts == 1, "HA was left to produce a reply nobody asked for"
+    assert s._tts_event.is_set()
+    assert not s._muse_call
+
+
+def test_a_real_request_is_still_answered():
+    s = satellite()
+    s._wake_word_phrase = "alexa"
+    speak(s, "Alexa, turn off the kitchen light")
+    assert not s._nothing_said
+    assert s.aborts == 0
+    assert not s._tts_event.is_set()
+
+
+def test_asking_for_muse_is_not_mistaken_for_silence():
+    s = satellite()
+    s._wake_word_phrase = "alexa"
+    speak(s, "Call Jarvis.")
+    assert not s._nothing_said
+    assert s._muse_call

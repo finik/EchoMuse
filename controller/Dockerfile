@@ -128,6 +128,7 @@ COPY em_boards.py .
 COPY em_auth.py .
 COPY em_eq.py .
 COPY em_limiter.py .
+COPY em_blankturn.py .
 COPY em_mbc.py .
 COPY em_musecall.py .
 COPY em_muselink.py .

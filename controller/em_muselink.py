@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Awaitable, Callable, Iterable
 
 import em_musecall
@@ -45,6 +46,25 @@ READY_TIMEOUT_S = 35.0
 # refused with HTTP 400; the SDK's own voice-call command passes this value
 # (cli.py:429), so a call made any other way needs it too.
 VOICE_APP_ID = "hatch-web"
+
+# What the voice turn puts on the queue to mark end of speech. These are
+# em_esphome.VAD_SENTINEL_END and VAD_SENTINEL_TIMEOUT, repeated rather than
+# imported because em_esphome imports this module; tests/test_muselink.py pins
+# them to the originals.
+#
+# They are strings on purpose, so they can never collide with a bytes payload.
+# Matching only None — which is what this did at first — meant end of speech
+# never registered, no silence went up, and Muse's endpointing had nothing to
+# finish on: it waited about 25 seconds for a server-side timeout before
+# answering anything (first run on real hardware, 2026-11-17).
+END_OF_SPEECH = frozenset({"vad_end", "vad_no_speech_timeout"})
+
+# How much silence goes up after end of speech before the microphone is
+# opened again. Muse decides the listener has finished by hearing silence, and
+# it has to hear enough of it before it will start answering at all. Re-arming
+# straight away sent 40 ms and the answer never came (hardware, 2026-11-17).
+# Long enough for that decision, short enough not to feel like a pause.
+MIC_SETTLE_S = 1.5
 
 # Queued speaker audio, in frames. Muse can answer faster than the Echo plays,
 # and a bounded queue is what stops a long answer growing without limit.
@@ -94,9 +114,18 @@ class EchoCallAudio:
         self._mic_open = False
         self._needs_mic = asyncio.Event()
         self._needs_mic.set()
+        # Muse answers only once it believes the listener has finished, and
+        # what tells it that is silence. Re-opening the microphone the instant
+        # speech ends sends none: the device's stream resumes, Muse treats the
+        # room as the listener still going, and the answer it had started is
+        # cancelled. Measured on hardware 2026-11-17 — 0 and 1 silent frames
+        # before re-arming, both answers cancelled.
+        self._muse_speaking = asyncio.Event()
         self._silence = bytes(MUSE_FRAME_BYTES)
         self.dropped_frames = 0
         self.silent_frames = 0
+        self.mic_frames = 0          # real 40 ms frames of listener audio
+        self.played_frames = 0       # 40 ms frames of Muse audio queued
 
     # ── Microphone ───────────────────────────────────────────────────────
 
@@ -104,6 +133,16 @@ class EchoCallAudio:
         """The device ended its turn stream; the listener has stopped speaking."""
         self._mic_open = False
         self._needs_mic.set()
+
+    def muse_started(self) -> None:
+        self._muse_speaking.set()
+
+    def muse_finished(self) -> None:
+        self._muse_speaking.clear()
+
+    async def wait_until_muse_quiet(self) -> None:
+        while self._muse_speaking.is_set():
+            await asyncio.sleep(0.05)
 
     def mic_opened(self) -> None:
         """A fresh turn stream is running; real audio is coming again."""
@@ -128,9 +167,8 @@ class EchoCallAudio:
         timeout: a guess would splice silence into the middle of a word
         whenever a frame arrived late.
 
-        Anything on the queue that is not PCM is a marker belonging to the
-        voice turn. The sentinel that ends a turn stream is what closes the
-        microphone here.
+        Anything else on the queue is a marker belonging to the voice turn;
+        only the end-of-speech sentinels close the microphone.
         """
         while not self._closed:
             while len(self._pending) >= MUSE_FRAME_BYTES:
@@ -153,11 +191,17 @@ class EchoCallAudio:
                     yield self._silence
                     continue
 
-            if isinstance(chunk, (bytes, bytearray)):
-                self._pending += self._up.process(bytes(chunk))
-            elif chunk is None:
-                # End of speech. Everything already captured still goes up.
+            if chunk in END_OF_SPEECH:
+                # The listener stopped. Silence from here tells Muse it may
+                # answer, and the device's stream is re-armed for whatever
+                # they say next.
                 self.mic_closed()
+            elif isinstance(chunk, (bytes, bytearray)):
+                if not self.mic_frames:
+                    log.info("call: first microphone audio reached Muse "
+                             "(after %d silent frames)", self.silent_frames)
+                self.mic_frames += 1
+                self._pending += self._up.process(bytes(chunk))
 
     # ── Speaker ──────────────────────────────────────────────────────────
 
@@ -167,6 +211,7 @@ class EchoCallAudio:
             return
         try:
             self._playback.put_nowait(self._down.process(pcm))
+            self.played_frames += 1
         except asyncio.QueueFull:
             # The speaker is further behind than the queue allows. Dropping
             # the newest frame keeps playback continuous and bounded; the
@@ -280,11 +325,31 @@ async def place_call(
     connection = asyncio.ensure_future(session.run(stop))
     try:
         await session.wait_transport_ready(READY_TIMEOUT_S)
+        started = time.monotonic()
+
+        def on_event(event) -> None:
+            # Timestamps are what tell a slow Muse apart from a microphone
+            # that never reached it: an answer that starts late is Muse
+            # thinking, no answer at all is the listener never arriving.
+            name = type(event).__name__
+            if name == "ResponseStarted":
+                audio.muse_started()
+            elif name in ("ResponseDone", "PlaybackFlushed"):
+                audio.muse_finished()
+            if name in ("ResponseStarted", "ResponseDone", "TranscriptDone"):
+                detail = getattr(event, "text", "") or getattr(event, "status", "") or ""
+                log.info("call: %s at +%.1fs%s", name, time.monotonic() - started,
+                         f" {detail[:80]!r}" if detail else "")
+
         call = VoiceCall(
             session, device_id=identity.node_id, thread_id=thread_id,
             half_duplex=True, idle_timeout=idle_timeout,
-            overall_timeout=overall_timeout)
+            overall_timeout=overall_timeout, on_event=on_event)
         await call.run(audio.frames(), audio)
+        log.info("call: ended after %.1fs — %d mic frames up, %d frames of "
+                 "Muse down, %d silent, %d dropped",
+                 time.monotonic() - started, audio.mic_frames,
+                 audio.played_frames, audio.silent_frames, audio.dropped_frames)
         return call.reason or "ended"
     finally:
         # Closing ends audio.playback(), which ends the caller's speaker
@@ -297,7 +362,8 @@ async def place_call(
 
 
 async def rearm_microphone(audio: EchoCallAudio,
-                           arm: Callable[[], Awaitable[None]]) -> None:
+                           arm: Callable[[], Awaitable[None]],
+                           settle: float = MIC_SETTLE_S) -> None:
     """Open a new turn stream each time the device ends one.
 
     The device ends its stream at end of speech, and after a few seconds of
@@ -307,10 +373,20 @@ async def rearm_microphone(audio: EchoCallAudio,
 
     Run as a task for the length of a call and cancel it afterwards.
     """
+    armed = 0
     while True:
         await audio.wait_mic_needed()
+        # Let the silence run before listening again, so Muse can tell the
+        # listener has stopped. frames() is sending it for the whole wait.
+        await asyncio.sleep(settle)
+        # Half duplex: nothing is captured while Muse is talking, or the
+        # answer gets cancelled by the room it is playing into.
+        await audio.wait_until_muse_quiet()
+        armed += 1
         await arm()
         audio.mic_opened()
+        log.info("call: microphone armed (%d) after %d silent frames, "
+                 "%d mic frames so far", armed, audio.silent_frames, audio.mic_frames)
 
 
 def available() -> str | None:

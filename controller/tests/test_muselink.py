@@ -69,18 +69,57 @@ class TestMicrophone:
         got = asyncio.run(scenario())
         assert [len(f) for f in got] == [em_muselink.MUSE_FRAME_BYTES] * 2
 
-    def test_markers_on_the_queue_do_not_end_the_call(self):
-        """voice_queue carries end-of-speech sentinels for a Home Assistant
-        turn. A call ends on its own timers, so these are skipped."""
+    def test_markers_that_are_not_end_of_speech_are_skipped(self):
+        """voice_queue carries other markers too. Only the end-of-speech
+        sentinels mean the listener stopped."""
         async def scenario():
             q = asyncio.Queue()
             audio, _ = make(q)
+            audio.mic_opened()
             q.put_nowait(None)
             q.put_nowait("listen_mode")
             q.put_nowait(mic_frame())
-            return await take(audio, 2)
+            got = await take(audio, 2)
+            return got, audio._mic_open
 
-        assert len(asyncio.run(scenario())) == 2
+        got, still_open = asyncio.run(scenario())
+        assert len(got) == 2
+        assert still_open, "an unrelated marker closed the microphone"
+
+    @pytest.mark.parametrize("sentinel", ["vad_end", "vad_no_speech_timeout"])
+    def test_end_of_speech_closes_the_microphone(self, sentinel):
+        """Matching None instead of these is what made Muse wait ~25s for a
+        server-side timeout before answering: end of speech never registered,
+        so no silence went up and its endpointing had nothing to finish on."""
+        async def scenario():
+            q = asyncio.Queue()
+            audio, _ = make(q)
+            audio.mic_opened()
+            q.put_nowait(mic_frame())
+            q.put_nowait(sentinel)
+            got = []
+            async for frame in audio.frames():
+                got.append(frame)
+                if len(got) == 4:
+                    audio.close()
+                    break
+            return got, audio.silent_frames
+
+        got, silent = asyncio.run(scenario())
+        assert silent >= 2, "no silence went up, so Muse cannot know to answer"
+        assert got[2:] == [bytes(em_muselink.MUSE_FRAME_BYTES)] * 2
+
+    def test_the_sentinels_are_the_ones_the_turn_actually_sends(self):
+        """Repeated rather than imported, because em_esphome imports this
+        module. Pinned here so a rename cannot silently stop ending speech."""
+        import _oww_stub
+        _oww_stub.install()
+        try:
+            import em_esphome
+        finally:
+            _oww_stub.uninstall()
+        assert em_muselink.END_OF_SPEECH == {
+            em_esphome.VAD_SENTINEL_END, em_esphome.VAD_SENTINEL_TIMEOUT}
 
     def test_the_mic_is_resampled_to_the_call_rate(self):
         """One continuous tone, cut into 80 ms frames the way the device sends
@@ -251,7 +290,7 @@ class TestRearm:
                 armed.append(len(armed) + 1)
                 q.put_nowait(mic_frame())
 
-            task = asyncio.ensure_future(em_muselink.rearm_microphone(audio, arm))
+            task = asyncio.ensure_future(em_muselink.rearm_microphone(audio, arm, settle=0))
             for _ in range(3):
                 audio.mic_closed()
                 await asyncio.sleep(0)
@@ -274,7 +313,7 @@ class TestRearm:
             async def arm():
                 armed.append(1)
 
-            task = asyncio.ensure_future(em_muselink.rearm_microphone(audio, arm))
+            task = asyncio.ensure_future(em_muselink.rearm_microphone(audio, arm, settle=0))
             await asyncio.sleep(0.05)
             task.cancel()
             return armed
@@ -289,7 +328,7 @@ class TestRearm:
             async def arm():
                 armed.append(1)
 
-            task = asyncio.ensure_future(em_muselink.rearm_microphone(audio, arm))
+            task = asyncio.ensure_future(em_muselink.rearm_microphone(audio, arm, settle=0))
             await asyncio.sleep(0.02)
             audio.mic_opened()
             await asyncio.sleep(0.05)
@@ -341,3 +380,57 @@ class TestGadget:
         for command in ("system.run", "file.read", "file.write", "device.health"):
             answer = deny.run(command, {})
             assert answer["ok"] is False, f"{command} was not refused"
+
+
+class TestHalfDuplex:
+    """Muse answers only when it hears silence, and cancels an answer it is
+    already giving if the room keeps arriving. Both were seen on hardware:
+    re-arming after 0 and 1 silent frames, each answer 'cancelled'."""
+
+    def test_silence_runs_before_the_microphone_reopens(self):
+        async def scenario():
+            q = asyncio.Queue()
+            audio, _ = make(q)
+            audio.mic_opened()
+            armed = []
+
+            async def arm():
+                armed.append(audio.silent_frames)
+
+            task = asyncio.ensure_future(
+                em_muselink.rearm_microphone(audio, arm, settle=0.3))
+            pump = asyncio.ensure_future(take(audio, 100))
+            audio.mic_closed()
+            await asyncio.sleep(0.45)
+            task.cancel(); pump.cancel()
+            await asyncio.gather(task, pump, return_exceptions=True)
+            return armed
+
+        armed = asyncio.run(scenario())
+        assert armed, "the microphone never came back"
+        assert armed[0] >= 5, (
+            f"only {armed[0]} frames of silence before listening again; "
+            "Muse cannot tell the listener has finished")
+
+    def test_the_microphone_stays_shut_while_muse_talks(self):
+        async def scenario():
+            audio, _ = make()
+            armed = []
+
+            async def arm():
+                armed.append(1)
+
+            audio.muse_started()
+            task = asyncio.ensure_future(
+                em_muselink.rearm_microphone(audio, arm, settle=0))
+            await asyncio.sleep(0.1)
+            during = len(armed)
+            audio.muse_finished()
+            await asyncio.sleep(0.15)
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            return during, len(armed)
+
+        during, after = asyncio.run(scenario())
+        assert during == 0, "listened while Muse was talking — it cancels its own answer"
+        assert after == 1, "the microphone never came back after Muse finished"

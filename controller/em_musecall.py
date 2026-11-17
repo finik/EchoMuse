@@ -34,6 +34,12 @@ WIRE_RATE = 48_000
 HANDOVER_PHRASES = frozenset({
     "call muse", "call jarvis",
     "talk to muse", "talk to jarvis",
+    # Speech-to-text truncates: "call Jarvis" came back as "Call." on
+    # 2026-11-17, which then reached the conversation agent, which could do
+    # nothing with it and said so out loud. A bare "call" is never a useful
+    # request to Home Assistant — it names nobody and commands nothing — so
+    # the only thing it can have been is this.
+    "call",
 })
 
 # Speech-to-text returns an ordinary sentence: capitals, a trailing full stop,
@@ -49,14 +55,22 @@ def normalise(text: str | None) -> str:
     return _NOT_WORDS.sub(" ", text.lower()).strip()
 
 
-def is_handover(text: str | None) -> bool:
+def is_handover(text: str | None, wake_word: str | None = None) -> bool:
     """Whether this transcript asks for Muse.
 
     The whole utterance must be the phrase. Matching a substring would hand
     the turn over on "ask Gemini what a call muse is", and a wrongly stolen
     turn is worse than a handover that needs saying again.
+
+    Speech-to-text usually keeps the wake word at the front of what it heard,
+    so it is removed first: "Alexa, call Muse" is the same request as
+    "call Muse".
     """
-    return normalise(text) in HANDOVER_PHRASES
+    said = normalise(text).split()
+    for w in normalise(wake_word).split():
+        if w in said:
+            said.remove(w)
+    return " ".join(said) in HANDOVER_PHRASES
 
 
 # Nothing here ends a call. The voice SDK reports only the words MUSE speaks
