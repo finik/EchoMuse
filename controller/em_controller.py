@@ -280,7 +280,17 @@ SPEAKER_PRIME_SECONDS = 1.1
 # returning to wake-word idle. User-tuned: long enough for a real
 # back-and-forth reply, short enough that the mic doesn't sit hot picking up
 # unrelated room chatter for too long.
-FOLLOWUP_NO_SPEECH_TIMEOUT = 9.0
+# The follow-up window, and the ring that counts it down, are the same number
+# on purpose: a ring describing a window longer than the one that exists stops
+# part-way round and reads as the Echo giving up early.
+#
+# 5.0 rather than 9.0 because 5 is what the turn actually gets. A silent
+# follow-up never reaches the branch this value bounds — the speech gate holds
+# audio back until Silero hears something, so `listening_since` stays None and
+# em_turnclock closes the turn on FIRST_AUDIO_GRACE instead. Asking for 9 made
+# the ring 12 segments over 9s while the window was 5, so it reached segment 6
+# and the outcome cue painted over it, every time, since 2026-08-17.
+FOLLOWUP_NO_SPEECH_TIMEOUT = 5.0
 
 # Control-plane RTT probing. 5s rather than the old 30s keepalive cadence:
 # characterising jitter needs samples, and one tiny JSON message per device
@@ -1696,6 +1706,10 @@ _OUTCOME_ANIM = {
     # HA chose to say nothing ("never mind"). Without a cue the ring went
     # from thinking to dark, which read as cut off. See em_scenes.done_anim.
     "silent_reply":  "done_anim",
+    # The agent answered with its own failure and the satellite refused to
+    # play it (em_agentfail). Nothing was heard, so the ring has to carry the
+    # whole message.
+    "agent_failed":  "error_anim",
 }
 
 # How long the listening ring is held before the no_ha cue replaces it. The
@@ -2331,6 +2345,7 @@ async def _paint_timer_countdown(device: Device) -> None:
     to move on its own after that. One second is the resolution HA gave us,
     and a 12-segment arc does not need finer.
     """
+    painted = False
     try:
         while True:
             server = esphome.get_server(device.device_id)
@@ -2343,13 +2358,34 @@ async def _paint_timer_countdown(device: Device) -> None:
                 return
             if _countdown_owns_ring(device):
                 remaining, total = snap
-                await device.set_leds(
-                    em_timers.countdown_leds(remaining, total, NUM_LEDS)
-                )
+                try:
+                    await device.set_leds(
+                        em_timers.countdown_leds(remaining, total, NUM_LEDS)
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    # A frame that cannot be sent (the control socket dropped
+                    # between ticks) must not end the arc: the device
+                    # reconnects and the next tick paints it again. Before
+                    # this, one failed write silently ended the countdown for
+                    # the rest of the timer, with nothing in the log to say so.
+                    log.debug(
+                        f"[{device.device_id}] Countdown frame not sent: {exc!r}"
+                    )
+                else:
+                    if not painted:
+                        painted = True
+                        log.info(
+                            f"[{device.device_id}] Timer countdown arc — "
+                            f"{remaining:.0f}s of {total:.0f}s left"
+                        )
             await asyncio.sleep(1.0)
     except asyncio.CancelledError:
         raise
     finally:
+        if painted:
+            log.info(f"[{device.device_id}] Timer countdown arc ended")
         if device.timer_countdown_task is asyncio.current_task():
             device.timer_countdown_task = None
 
@@ -2371,9 +2407,23 @@ async def sync_timer_countdown(device: Device) -> None:
     task = device.timer_countdown_task
     if show:
         if task is None or task.done():
-            device.timer_countdown_task = asyncio.create_task(
-                _paint_timer_countdown(device)
-            )
+            started = asyncio.create_task(_paint_timer_countdown(device))
+            device.timer_countdown_task = started
+
+            def _paint_done(t: asyncio.Task) -> None:
+                # Same reason as the alarm's _ring_done: an arc that dies on
+                # an exception would leave no ring and no log line, which
+                # looks exactly like HA never sending the timer event.
+                if t.cancelled():
+                    return
+                exc = t.exception()
+                if exc is not None:
+                    log.error(
+                        f"[{device.device_id}] Timer countdown arc failed: "
+                        f"{exc!r}", exc_info=exc
+                    )
+
+            started.add_done_callback(_paint_done)
         return
     was_painting = task is not None and not task.done()
     device.timer_countdown_task = None

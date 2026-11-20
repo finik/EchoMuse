@@ -96,6 +96,7 @@ import em_player
 import em_tasks
 import em_timers
 import em_house_announce
+import em_agentfail
 import em_blankturn
 import em_musecall
 import em_muselink
@@ -419,6 +420,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         self._on_stt_end        = None   # async callable(text: str)
         self._muse_call         = False  # this turn was handed to Muse
         self._nothing_said      = False  # transcript held no request at all
+        self._agent_failed      = ""     # HA spoke its own failure, not an answer
         self._wake_word_phrase  = ""     # what woke it, for the blank check
         self._muse_call_cb      = None   # async callable(device) -> str
         self._on_announce       = None   # async callable(pcm_bytes) — set only during an active voice turn (run_esphome_voice_turn); None otherwise. The standalone-announce path (setup wizard, push TTS) does NOT use this — it reads self._owning_server._standalone_play live at call time instead, since that value can legitimately change after this satellite was constructed (see _announce_play_cb).
@@ -1015,10 +1017,6 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 em_tasks.spawn(self._on_stt_end(text))
 
         elif event_type == ET.VOICE_ASSISTANT_INTENT_END:
-            # Temporary: find out whether HA names the agent's reply here, so
-            # a spoken failure ("Unable to get response") can be recognised
-            # and suppressed rather than played at the room.
-            log.info(f"[{self._log_name}] INTENT_END data: {dict(data)}")
             # Reliable "STT + intent resolution genuinely finished" marker —
             # always arrives after STT_END, always before TTS_START/RUN_END
             # in a normal turn. Used to tell a real terminal RUN_END apart
@@ -1029,8 +1027,26 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 log.debug(f"[{self._log_name}] HA requested conversation continuation")
 
         elif event_type == ET.VOICE_ASSISTANT_TTS_START:
-            log.info(f"[{self._log_name}] TTS starting")
+            # The reply's text, before a syllable of it has been synthesised.
+            # Worth logging on every turn: it is the only place the satellite
+            # ever learns WHAT was said, and a transcript beside a reply is
+            # what makes a bad turn readable afterwards.
+            reply = data.get("text", "")
+            log.info(f"[{self._log_name}] TTS starting: {reply!r}")
             self._tts_started = True
+            if em_agentfail.is_failure(reply):
+                # Home Assistant apologising, not answering (em_agentfail).
+                # The room must not hear it: the usual cause is an agent that
+                # called a tool and wrote no closing line, so the thing asked
+                # for has already happened and silence is the truthful reply.
+                # _tts_event ends the wait here, before TTS_END delivers a url
+                # there is now no reason to fetch.
+                self._agent_failed = reply
+                self._tts_event.set()
+                log.warning(
+                    f"[{self._log_name}] Home Assistant answered with its own "
+                    f"failure ({reply!r}) — not playing it"
+                )
 
         elif event_type == ET.VOICE_ASSISTANT_TTS_END:
             # TTS URL arrives here in some pipeline configurations.
@@ -1379,6 +1395,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         self._muse_call             = False
         self._muse_call_cb          = muse_call
         self._nothing_said          = False
+        self._agent_failed          = ""
         self._wake_word_phrase      = wake_word_phrase
         self._tts_event.clear()
         self._tts_audio_url         = None
@@ -1458,7 +1475,17 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             # instead of hanging the turn (and the spinner) indefinitely.
             try:
                 await asyncio.wait_for(
-                    self._stream_mic_audio(device, preroll_discard=preroll_discard),
+                    # no_speech_timeout is the CALLER's patience (a follow-up
+                    # window asks for 9s where an ordinary turn takes 5), and
+                    # _stream_mic_audio is the only thing that reads it. It
+                    # was accepted here and never passed on, so every caller's
+                    # patience was silently discarded and every turn used the
+                    # default — including the follow-up window, whose ring was
+                    # counting down nine seconds of a five-second window.
+                    self._stream_mic_audio(
+                        device, preroll_discard=preroll_discard,
+                        no_speech_timeout=no_speech_timeout,
+                    ),
                     timeout=20.0,
                 )
             except asyncio.TimeoutError:
@@ -1548,6 +1575,13 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 # bare word "announce" would talk over the question.
                 log.info(f"[{self._log_name}] House announce — suppressing HA's reply")
                 if trace: trace.outcome = "house_announce"
+                return
+
+            if self._agent_failed:
+                # Recognised at TTS_START and never played. The turn ends on
+                # the error cue so the ring says something went wrong, which
+                # is all the room needs to know.
+                if trace: trace.outcome = "agent_failed"
                 return
 
             if self._tts_audio_url:
@@ -1867,6 +1901,20 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             no_speech_timeout if no_speech_timeout is not None
             else em_turnclock.NO_SPEECH_TIMEOUT
         )
+        # The same patience has to bound the OTHER branch of the verdict, or
+        # it never applies. no_speech_verdict measures from the first real
+        # frame when one has arrived and from turn start when none has — and
+        # in a silent follow-up window none ever does, because the speech gate
+        # holds audio back until Silero hears something. So the turn was being
+        # closed by first_audio_grace (5s) while the caller had asked for 9,
+        # and the ring counting that window down was paced for 9s: it reached
+        # about two thirds and the outcome cue painted over it. The countdown
+        # never closed its circle, which is the one thing its own docstring
+        # says it must do.
+        effective_first_audio_grace = (
+            no_speech_timeout if no_speech_timeout is not None
+            else em_turnclock.FIRST_AUDIO_GRACE
+        )
 
         # Controller-side endpointing, armed only when HA's VAD has been ruled
         # out — see em_turnclock.ha_vad_stalled_verdict for why the absence of
@@ -1931,6 +1979,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                     now=time.monotonic(), turn_start=turn_start,
                     listening_since=listening_since, speech_seen=speech_seen,
                     no_speech_timeout=effective_no_speech_timeout,
+                    first_audio_grace=effective_first_audio_grace,
                 )
                 if give_up:
                     log.info(
