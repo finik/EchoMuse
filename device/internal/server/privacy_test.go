@@ -21,3 +21,23 @@ func TestDecidePrivacyAlwaysLandsOnMuted(t *testing.T) {
 		}
 	}
 }
+
+// rook reads privacy_state=1 on every boot, whatever the button was last left
+// at, and the state cannot be cleared from software. Trusting it muted the
+// microphone once per power cycle — and persisted, so it stayed muted.
+// Measured on the Family Room Spot 2026-11-20: unmuted by button at 03:08,
+// `privacy driver is muted … muting to match` at the 07:29 boot.
+func TestABootTimeDriverMuteIsIgnored(t *testing.T) {
+	m := newMuteController(nil, nil)
+	persisted := 0
+	m.persist = func() { persisted++ }
+
+	m.applyPrivacy(privacyMuteOurs, true)
+
+	if m.IsMuted() {
+		t.Error("the driver's boot reading muted the microphone")
+	}
+	if persisted != 0 {
+		t.Errorf("a boot reading wrote state.json %d times", persisted)
+	}
+}

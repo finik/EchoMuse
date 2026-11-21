@@ -197,8 +197,10 @@ func NewServer(buttonController buttons.Controller, microphone mic.Microphone, s
 			server.mute.showMuteLEDs()
 			setMuteButtonLED(true)
 		}
-		// Amazon's privacy driver boots unmuted whatever we restored.
-		server.mute.reconcilePrivacySoon()
+		// Amazon's privacy driver boots unmuted whatever we restored on
+		// biscuit; on rook it boots MUTED whatever the button was left at,
+		// which is why this one passes atBoot=true (privacy.go).
+		server.mute.reconcilePrivacySoon(true)
 	}()
 
 	return server

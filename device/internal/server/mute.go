@@ -70,7 +70,7 @@ func (m *muteController) Toggle() {
 	if cb != nil {
 		cb(muted)
 	}
-	m.reconcilePrivacySoon()
+	m.reconcilePrivacySoon(false)
 }
 
 // setAdcMute writes the board's microphone mutes (pkg/board MicMutes), every

@@ -40,16 +40,28 @@ func decidePrivacy(ours, driver bool) privacyAction {
 const privacySettle = 700 * time.Millisecond
 
 // reconcilePrivacySoon checks the two agree once a press has settled.
-func (m *muteController) reconcilePrivacySoon() {
+//
+// atBoot marks the single reconcile that runs at startup rather than after a
+// button press. The driver's reading cannot be trusted there: rook comes up
+// with privacy_state=1 on EVERY boot, whatever the button was last left at,
+// and privacy_trigger=0 is ignored, so the state cannot be cleared from
+// software (measured on the Family Room Spot 2026-11-20, state left unmuted
+// at 03:08 and reading 1 again at the 07:29 boot).
+//
+// Believing it cost the user their microphone once per power cycle: the boot
+// reconcile muted us to match, and that Toggle persists, so state.json came
+// back muted for every boot after it. The Family Room Spot runs on a light
+// switch, so that was every time the light went on.
+func (m *muteController) reconcilePrivacySoon(atBoot bool) {
 	if !internalLed.PrivacyDriver() {
 		return
 	}
-	time.AfterFunc(privacySettle, func() { m.reconcilePrivacy(5) })
+	time.AfterFunc(privacySettle, func() { m.reconcilePrivacy(5, atBoot) })
 }
 
-func (m *muteController) reconcilePrivacy(retries int) {
+func (m *muteController) reconcilePrivacy(retries int, atBoot bool) {
 	if entering, err := internalLed.PrivacyEntering(); err == nil && entering && retries > 0 {
-		time.AfterFunc(privacySettle, func() { m.reconcilePrivacy(retries - 1) })
+		time.AfterFunc(privacySettle, func() { m.reconcilePrivacy(retries-1, atBoot) })
 		return
 	}
 	driver, err := internalLed.PrivacyMuted()
@@ -57,13 +69,24 @@ func (m *muteController) reconcilePrivacy(retries int) {
 		log.Printf("Mute: %v", err)
 		return
 	}
-	switch decidePrivacy(m.IsMuted(), driver) {
+	m.applyPrivacy(decidePrivacy(m.IsMuted(), driver), atBoot)
+}
+
+// applyPrivacy carries out a decision. Separate from the sysfs reads above so
+// the boot rule can be tested without a privacy driver to read.
+func (m *muteController) applyPrivacy(action privacyAction, atBoot bool) {
+	switch action {
 	case privacyEnterDriver:
 		log.Println("Mute: privacy driver was unmuted while we are muted — muting it")
 		if err := internalLed.EnterPrivacy(); err != nil {
 			log.Printf("Mute: %v", err)
 		}
 	case privacyMuteOurs:
+		if atBoot {
+			// Not a privacy state anyone asked for — see reconcilePrivacySoon.
+			log.Println("Mute: privacy driver reads muted at boot — ignoring, only a button press is trusted")
+			return
+		}
 		log.Println("Mute: privacy driver is muted and cannot be unmuted from software — muting to match")
 		if !m.IsMuted() {
 			m.Toggle()
