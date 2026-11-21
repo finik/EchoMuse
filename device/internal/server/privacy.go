@@ -42,11 +42,15 @@ const privacySettle = 700 * time.Millisecond
 // reconcilePrivacySoon checks the two agree once a press has settled.
 //
 // atBoot marks the single reconcile that runs at startup rather than after a
-// button press. The driver's reading cannot be trusted there: rook comes up
-// with privacy_state=1 on EVERY boot, whatever the button was last left at,
-// and privacy_trigger=0 is ignored, so the state cannot be cleared from
-// software (measured on the Family Room Spot 2026-11-20, state left unmuted
-// at 03:08 and reading 1 again at the 07:29 boot).
+// button press. The driver's reading cannot be trusted there. One Spot (the
+// Family Room unit, 2026-11-20) comes up with privacy_state=1 on every boot
+// whatever the button was last left at — unmuted by hand at 03:08, reading 1
+// again at the 07:29 boot — and privacy_trigger=0 is ignored, so nothing in
+// software can clear it. The Bedroom Spot, same board and same firmware,
+// reads 0: this is a latch one unit is stuck in, not how rook boots. Which
+// is the point — a boot reading can be a stale latch, it cannot be told
+// apart from a real one, and acting on it costs that unit its microphone
+// for good.
 //
 // Believing it cost the user their microphone once per power cycle: the boot
 // reconcile muted us to match, and that Toggle persists, so state.json came
