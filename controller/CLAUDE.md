@@ -392,7 +392,11 @@ system`/`Power down`; marker after a complete read; SSIDs dropped.
 - Firmware cache (`em_firmware.py`): md5 decides a hit; a cache failure is
   never an update failure; never `Path.with_suffix` on tag names.
 - Payloads live only in `controller/device_payloads/`, each with an update
-  path (`test_deploy.py`). `sync_debloat` checks the `pm hide` list with
+  path (`test_deploy.py`, which walks the subdirectories too). The rook
+  set — Magisk `service.d` scripts and the panel APK — syncs through
+  `em_rookpayload` on connect and on OTA, board-gated inside `sync()`;
+  `device/scripts/` symlinks into the payload dir, and `rook_panel.apk`
+  is built there and never tracked. `sync_debloat` checks the `pm hide` list with
   `grep -qx`; `POST /api/devices/{id}/debloat` is required.
 - `com.amazon.whad` is `PERSISTENT`: `pm disable` is ignored, `am force-stop`
   is a no-op, and `pm hide` leaves it running until the next reboot.

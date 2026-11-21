@@ -18,6 +18,7 @@ import em_db as db
 import em_events
 import em_oww_assets
 import em_payloads
+import em_rookpayload
 import em_releases
 import em_shell
 import em_state
@@ -295,6 +296,13 @@ async def _run_update_locked(device_id: str, release: dict,
         # a payload that should never have been sent.
         if live.android_userspace:
             await em_payloads.sync_debloat(live, device_id)
+        # The Spot's own payloads — Magisk service.d scripts and the panel
+        # APK — had no update path at all until em_rookpayload; adb was the
+        # only way to change either, which is a cable for a device on a
+        # light switch. Rook-gated inside sync(), android_userspace-gated
+        # here for the same reason the debloat is.
+        if live.android_userspace:
+            await em_rookpayload.sync(live, device_id)
 
         inactive_slot = "server_b" if active_slot == "server_a" else "server_a"
 

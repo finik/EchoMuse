@@ -22,6 +22,7 @@ import em_emos_ota
 import em_events
 import em_oww_sync
 import em_payloads
+import em_rookpayload
 import em_shell
 import em_state
 import em_tasks
@@ -182,6 +183,11 @@ async def _reconcile_payloads(device_id: str, live) -> bool:
     # why absence keeps today's behaviour.
     if live.android_userspace:
         steps.append(("debloat", lambda: em_payloads.sync_debloat(live, device_id)))
+        # The Spot's Magisk service.d scripts and its panel APK, on the same
+        # gate and for the same reason — both are Magisk/Android shapes. Rook
+        # is checked inside em_rookpayload.sync, so a Dot spends nothing here.
+        steps.append(("rook payloads",
+                      lambda: em_rookpayload.sync(live, device_id)))
     finished = True
     for name, make in steps:
         # Re-read each time, and compare IDENTITY rather than presence: these

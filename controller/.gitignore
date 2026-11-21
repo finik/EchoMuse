@@ -1,0 +1,3 @@
+
+# Built by rook_panel/build.sh into the payload dir, never tracked
+device_payloads/rook/*.apk

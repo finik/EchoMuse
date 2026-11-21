@@ -275,8 +275,12 @@ def test_every_device_payload_has_an_update_path():
     root = Path(__file__).resolve().parent.parent
     # The sync module, not em_api: the provisioning routes there name every
     # payload too, and "installed only by the wizard" is the case this catches.
-    syncs = (root / "em_payloads.py").read_text()
-    payloads = sorted(p.name for p in (root / "device_payloads").iterdir() if p.is_file())
+    syncs = ((root / "em_payloads.py").read_text()
+             + (root / "em_rookpayload.py").read_text())
+    # rglob, because the rook payloads sit in a subdirectory: a payload one
+    # level down drifts exactly as hard as one at the top.
+    payloads = sorted(p.name for p in (root / "device_payloads").rglob("*")
+                      if p.is_file() and not p.name.startswith("."))
     assert payloads, "device_payloads/ is empty — has it moved?"
 
     for name in payloads:

@@ -62,7 +62,7 @@ fi
 "$BT/apksigner" sign \
   --ks "$KEY" --ks-pass pass:android --key-pass pass:android \
   --min-sdk-version "$MIN_API" \
-  --out "$HERE/rook_panel.apk" aligned.apk
+  --out "$HERE/../controller/device_payloads/rook/rook_panel.apk" aligned.apk
 
 echo ""
 echo "✓ $HERE/rook_panel.apk"
